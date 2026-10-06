@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "retrobranch"
+version = "0.1.0"
+description = "Pre-flight decision engine for backport eligibility and triggering"
+readme = "README.md"
+authors = [
+    { name = "Isaac Saito" },
+]
+license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Version Control :: Git",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+keywords = ["git", "github", "backport", "automation", "mergify", "ci-cd"]
+requires-python = ">=3.8"
+dependencies = [
+    "pyyaml>=5.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/kinu-garage/retrobranch"
+Repository = "https://github.com/kinu-garage/retrobranch"
+Issues = "https://github.com/kinu-garage/retrobranch/issues"
+
+[project.scripts]
+retrobr = "retrobranch.cli:main"
+retrobranch = "retrobranch.cli:main"
