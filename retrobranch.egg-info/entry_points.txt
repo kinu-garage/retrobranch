@@ -1,0 +1,3 @@
+[console_scripts]
+retrobr = retrobranch.cli:main
+retrobranch = retrobranch.cli:main

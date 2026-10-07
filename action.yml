@@ -1,0 +1,101 @@
+name: 'Retrobranch'
+description: 'Pre-flight decision engine for backport eligibility and triggering'
+author: 'Isaac Saito'
+
+branding:
+  icon: 'git-branch'
+  color: 'blue'
+
+inputs:
+  pr-number:
+    description: 'Pull Request number to evaluate'
+    required: true
+  commit:
+    description: 'PR merge commit SHA (auto-detected if omitted)'
+    required: false
+    default: ''
+  base-branch:
+    description: 'Base branch the PR targeted (default: main)'
+    required: false
+    default: 'main'
+  target-branches:
+    description: 'Optional comma-separated list of target branches (e.g. "release-2.0,release-1.0")'
+    required: false
+    default: ''
+  filter-branches:
+    description: 'Optional comma-separated list of branches to restrict evaluation to'
+    required: false
+    default: ''
+  config-file:
+    description: 'Path to branch configuration file (supports Mergify YAML, generic YAML/JSON, or plain text)'
+    required: false
+    default: ''
+  source-type:
+    description: 'Format type for config-file (auto, mergify, yaml, json, text)'
+    required: false
+    default: 'auto'
+  mergify-config:
+    description: 'Path to Mergify configuration file (legacy alias for config-file)'
+    required: false
+    default: ''
+  dry-run:
+    description: 'Dry run mode (evaluate without adding labels or posting comments)'
+    required: false
+    default: 'false'
+  label-template:
+    description: 'Template pattern for backport labels (default: "backport-{branch}"). Supports {branch}, {target}, %s'
+    required: false
+    default: ''
+  github-token:
+    description: 'GitHub token for GitHub CLI and API access'
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python3 -m pip install --upgrade pip
+        python3 -m pip install pyyaml
+
+    - name: Run Retrobranch
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        CMD="python3 ${{ github.action_path }}/retrobranch/cli.py --pr-number ${{ inputs.pr-number }}"
+        if [ -n "${{ inputs.commit }}" ]; then
+          CMD="$CMD --commit ${{ inputs.commit }}"
+        fi
+        if [ -n "${{ inputs.base-branch }}" ]; then
+          CMD="$CMD --base-branch ${{ inputs.base-branch }}"
+        fi
+        if [ -n "${{ inputs.target-branches }}" ]; then
+          CMD="$CMD --target-branches ${{ inputs.target-branches }}"
+        fi
+        if [ -n "${{ inputs.filter-branches }}" ]; then
+          CMD="$CMD --filter-branches ${{ inputs.filter-branches }}"
+        fi
+        if [ -n "${{ inputs.config-file }}" ] && [ -f "${{ inputs.config-file }}" ]; then
+          CMD="$CMD --config-file ${{ inputs.config-file }}"
+        elif [ -n "${{ inputs.mergify-config }}" ] && [ -f "${{ inputs.mergify-config }}" ]; then
+          CMD="$CMD --mergify-config ${{ inputs.mergify-config }}"
+        fi
+        if [ -n "${{ inputs.source-type }}" ]; then
+          CMD="$CMD --source-type ${{ inputs.source-type }}"
+        fi
+        if [ -n "${{ inputs.label-template }}" ]; then
+          CMD="$CMD --label-template '${{ inputs.label-template }}'"
+        fi
+        if [ "${{ inputs.dry-run }}" = "true" ]; then
+          CMD="$CMD --dry-run"
+        fi
+        eval $CMD
+
