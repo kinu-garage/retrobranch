@@ -148,7 +148,7 @@ python3 -m build
 | :--- | :--- | :---: | :--- |
 | `pr-number` | Pull request number to evaluate | **Yes** | — |
 | `commit` | PR merge commit SHA | No | *(auto-detected)* |
-| `base-branch` | Target base branch PR was merged into | No | `main` |
+| `base-branch` | Target base branch PR was merged into | No | *(auto-detected from repo / config / `main`)* |
 | `target-branches` | Comma-separated list of target branches (e.g. `release-1.0,release-2.0`) | No | `""` |
 | `filter-branches` | Comma-separated list to filter candidate branches | No | `""` |
 | `config-file` | Path to branch configuration file (Mergify YAML, generic YAML/JSON, or text) | No | `""` |

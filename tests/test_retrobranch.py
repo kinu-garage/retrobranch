@@ -414,6 +414,177 @@ class TestLabelFormatting(unittest.TestCase):
         self.assertEqual(format_label("needs-backport", "humble"), "needs-backport")
 
 
+class TestBaseBranchConfig(unittest.TestCase):
+    """Tests base branch resolution from configuration file and CLI flags."""
+
+    def test_cli_resolves_base_branch_from_config(self):
+        from retrobranch.cli import main
+        mock_pr = {
+            "number": 100,
+            "title": "fix: bugfix",
+            "labels": [],
+            "headRefName": "fix-1",
+            "baseRefName": "develop",
+            "mergeCommit": {"oid": "abcdef1234567890"},
+            "mergedAt": "2026-10-07T12:00:00Z",
+            "url": "https://github.com/owner/repo/pull/100",
+        }
+        config_content = "base_branch: develop\nmaintained_branches:\n  - test-ci\n"
+        with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as f:
+            f.write(config_content)
+            config_path = f.name
+
+        try:
+            with patch("sys.argv", ["retrobr", "100", "--config-file", config_path, "--dry-run"]), \
+                 patch("retrobranch.cli.fetch_pr_info", return_value=mock_pr), \
+                 patch("retrobranch.cli.verify_issue_presence_in_branch", return_value=(True, "matched")), \
+                 patch("retrobranch.cli.run_cmd", return_value=(0, "refs/heads/test-ci", "")), \
+                 patch("retrobranch.engine.run_cmd", return_value=(0, "refs/heads/test-ci", "")):
+                main()
+        finally:
+            os.remove(config_path)
+
+    def test_cli_flag_overrides_config_base_branch(self):
+        from retrobranch.cli import main
+        mock_pr = {
+            "number": 100,
+            "title": "fix: bugfix",
+            "labels": [],
+            "headRefName": "fix-1",
+            "baseRefName": "staging",
+            "mergeCommit": {"oid": "abcdef1234567890"},
+            "mergedAt": "2026-10-07T12:00:00Z",
+            "url": "https://github.com/owner/repo/pull/100",
+        }
+        config_content = "base_branch: develop\nmaintained_branches:\n  - test-ci\n"
+        with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as f:
+            f.write(config_content)
+            config_path = f.name
+
+        try:
+            with patch("sys.argv", ["retrobr", "100", "--config-file", config_path, "--base-branch", "staging", "--dry-run"]), \
+                 patch("retrobranch.cli.fetch_pr_info", return_value=mock_pr), \
+                 patch("retrobranch.cli.verify_issue_presence_in_branch", return_value=(True, "matched")), \
+                 patch("retrobranch.cli.run_cmd", return_value=(0, "refs/heads/test-ci", "")), \
+                 patch("retrobranch.engine.run_cmd", return_value=(0, "refs/heads/test-ci", "")):
+                main()
+        finally:
+            os.remove(config_path)
+
+    def test_cli_auto_detects_default_branch(self):
+        from retrobranch.cli import main
+        mock_pr = {
+            "number": 100,
+            "title": "fix: bugfix",
+            "labels": [],
+            "headRefName": "fix-1",
+            "baseRefName": "rolling",
+            "mergeCommit": {"oid": "abcdef1234567890"},
+            "mergedAt": "2026-10-07T12:00:00Z",
+            "url": "https://github.com/owner/repo/pull/100",
+        }
+        with patch("sys.argv", ["retrobr", "100", "--target-branches", "test-ci", "--dry-run"]), \
+             patch("retrobranch.cli.fetch_pr_info", return_value=mock_pr), \
+             patch("retrobranch.cli.detect_repo_default_branch", return_value="rolling") as mock_detect, \
+             patch("retrobranch.cli.verify_issue_presence_in_branch", return_value=(True, "matched")) as mock_verify, \
+             patch("retrobranch.cli.run_cmd", return_value=(0, "refs/heads/test-ci", "")), \
+             patch("retrobranch.engine.run_cmd", return_value=(0, "refs/heads/test-ci", "")):
+            with self.assertLogs("retrobranch", level="INFO") as cm:
+                main()
+            mock_detect.assert_called_once_with(repo="owner/repo")
+            mock_verify.assert_called_once_with("abcdef1234567890", "test-ci")
+            self.assertTrue(any("Recognized main branch: 'rolling' (auto-detected from repository)" in msg for msg in cm.output))
+
+    def test_cli_falls_back_to_main_when_auto_detect_returns_none(self):
+        from retrobranch.cli import main
+        mock_pr = {
+            "number": 100,
+            "title": "fix: bugfix",
+            "labels": [],
+            "headRefName": "fix-1",
+            "baseRefName": "main",
+            "mergeCommit": {"oid": "abcdef1234567890"},
+            "mergedAt": "2026-10-07T12:00:00Z",
+            "url": "https://github.com/owner/repo/pull/100",
+        }
+        with patch("sys.argv", ["retrobr", "100", "--target-branches", "test-ci", "--dry-run"]), \
+             patch("retrobranch.cli.fetch_pr_info", return_value=mock_pr), \
+             patch("retrobranch.cli.detect_repo_default_branch", return_value=None), \
+             patch("retrobranch.cli.verify_issue_presence_in_branch", return_value=(True, "matched")) as mock_verify, \
+             patch("retrobranch.cli.run_cmd", return_value=(0, "refs/heads/test-ci", "")), \
+             patch("retrobranch.engine.run_cmd", return_value=(0, "refs/heads/test-ci", "")):
+            with self.assertLogs("retrobranch", level="INFO") as cm:
+                main()
+            mock_verify.assert_called_once_with("abcdef1234567890", "test-ci")
+            self.assertTrue(any("Recognized main branch: 'main' (default fallback)" in msg for msg in cm.output))
+
+
+class TestDetectRepoDefaultBranch(unittest.TestCase):
+    """Tests programmatic default branch detection."""
+
+    def test_detect_from_symbolic_ref_origin(self):
+        from retrobranch.engine import detect_repo_default_branch
+
+        def mock_run(cmd, *args, **kwargs):
+            if cmd[:3] == ["git", "symbolic-ref", "--short"]:
+                return (0, "origin/master", "")
+            return (1, "", "")
+
+        with patch("retrobranch.engine.run_cmd", side_effect=mock_run):
+            branch = detect_repo_default_branch()
+            self.assertEqual(branch, "master")
+
+    def test_detect_from_symbolic_ref_upstream(self):
+        from retrobranch.engine import detect_repo_default_branch
+
+        def mock_run(cmd, *args, **kwargs):
+            if cmd == ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]:
+                return (1, "", "")
+            if cmd == ["git", "symbolic-ref", "--short", "refs/remotes/upstream/HEAD"]:
+                return (0, "upstream/main", "")
+            return (1, "", "")
+
+        with patch("retrobranch.engine.run_cmd", side_effect=mock_run):
+            branch = detect_repo_default_branch()
+            self.assertEqual(branch, "main")
+
+    def test_detect_from_ls_remote(self):
+        from retrobranch.engine import detect_repo_default_branch
+
+        def mock_run(cmd, *args, **kwargs):
+            if cmd[:3] == ["git", "symbolic-ref", "--short"]:
+                return (1, "", "")
+            if cmd[:4] == ["git", "ls-remote", "--symref", "origin"]:
+                return (0, "ref: refs/heads/rolling\tHEAD\nabcdef123\tHEAD", "")
+            return (1, "", "")
+
+        with patch("retrobranch.engine.run_cmd", side_effect=mock_run):
+            branch = detect_repo_default_branch()
+            self.assertEqual(branch, "rolling")
+
+    def test_detect_from_gh_repo_view(self):
+        from retrobranch.engine import detect_repo_default_branch
+
+        def mock_run(cmd, *args, **kwargs):
+            if cmd[0] == "git":
+                return (1, "", "")
+            if cmd[:3] == ["gh", "repo", "view"]:
+                return (0, "develop", "")
+            return (1, "", "")
+
+        with patch("retrobranch.engine.run_cmd", side_effect=mock_run):
+            branch = detect_repo_default_branch(repo="owner/repo")
+            self.assertEqual(branch, "develop")
+
+    def test_detect_all_fail_returns_none(self):
+        from retrobranch.engine import detect_repo_default_branch
+
+        with patch("retrobranch.engine.run_cmd", return_value=(1, "", "")):
+            branch = detect_repo_default_branch(repo="owner/repo")
+            self.assertIsNone(branch)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

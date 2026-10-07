@@ -6,6 +6,7 @@ __version__ = "0.1.0"
 
 from .engine import (
     add_pr_label,
+    detect_repo_default_branch,
     do_modified_lines_exist_in_target,
     fetch_pr_info,
     format_label,
@@ -40,6 +41,7 @@ __all__ = [
     "was_commit_previously_backported",
     "do_modified_lines_exist_in_target",
     "verify_issue_presence_in_branch",
+    "detect_repo_default_branch",
     "fetch_pr_info",
     "format_label",
     "add_pr_label",

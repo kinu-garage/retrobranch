@@ -15,9 +15,9 @@ inputs:
     required: false
     default: ''
   base-branch:
-    description: 'Base branch the PR targeted (default: main)'
+    description: 'Base branch the PR targeted (default: resolved from config file, auto-detected, or main)'
     required: false
-    default: 'main'
+    default: ''
   target-branches:
     description: 'Optional comma-separated list of target branches (e.g. "release-2.0,release-1.0")'
     required: false
@@ -69,8 +69,9 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        PYTHONPATH: ${{ github.action_path }}
       run: |
-        CMD="python3 ${{ github.action_path }}/retrobranch/cli.py --pr-number ${{ inputs.pr-number }}"
+        CMD="python3 -m retrobranch.cli --pr-number ${{ inputs.pr-number }}"
         if [ -n "${{ inputs.commit }}" ]; then
           CMD="$CMD --commit ${{ inputs.commit }}"
         fi

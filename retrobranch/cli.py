@@ -7,6 +7,7 @@ import yaml
 
 from .engine import (
     add_pr_label,
+    detect_repo_default_branch,
     fetch_pr_info,
     format_label,
     get_maintained_branches,
@@ -53,7 +54,12 @@ def main():
         help="PR number or GitHub PR URL to evaluate",
     )
     parser.add_argument("--commit", type=str, default=None, help="PR merge commit SHA (auto-detected if omitted)")
-    parser.add_argument("--base-branch", type=str, default="main", help="Target base branch PR was merged into (default: main)")
+    parser.add_argument(
+        "--base-branch",
+        type=str,
+        default=None,
+        help="Target base branch PR was merged into (default: resolved from config file, auto-detected, or 'main')",
+    )
     parser.add_argument("--mergify-config", type=str, default=None, help="Path to mergify.yml config (legacy option)")
     parser.add_argument(
         "--config-file",
@@ -115,6 +121,8 @@ def main():
     mergify_config = args.mergify_config
     if not config_file and not mergify_config and not args.target_branches:
         for default_path in [
+            ".github/retrobranch.yml",
+            ".retrobranch.yml",
             ".github/mergify.yml",
             ".github/maintained_branches.yml",
             ".github/branches.txt",
@@ -125,21 +133,52 @@ def main():
                 config_file = default_path
                 break
 
-    # Resolve label template (CLI flag > config file > default "backport-{branch}")
-    label_template = args.label_template
-    if not label_template and config_file and os.path.exists(config_file):
+    # Load configuration from config file if available
+    cfg_data = None
+    if config_file and os.path.exists(config_file):
         try:
             with open(config_file, "r", encoding="utf-8") as f:
-                cfg_data = yaml.safe_load(f)
-                if isinstance(cfg_data, dict):
-                    for k in ("label_template", "label-template", "label_pattern", "label-pattern"):
-                        if k in cfg_data and isinstance(cfg_data[k], str):
-                            label_template = cfg_data[k]
-                            break
-        except Exception:
-            pass
+                loaded = yaml.safe_load(f)
+                if isinstance(loaded, dict):
+                    cfg_data = loaded
+        except Exception as e:
+            logger.warning(f"Failed to read config file '{config_file}': {e}")
+
+    # Resolve label template (CLI flag > config file > default "backport-{branch}")
+    label_template = args.label_template
+    if not label_template and cfg_data:
+        for k in ("label_template", "label-template", "label_pattern", "label-pattern"):
+            if k in cfg_data and isinstance(cfg_data[k], str):
+                label_template = cfg_data[k]
+                break
     if not label_template:
         label_template = "backport-{branch}"
+
+    # Resolve base branch (CLI flag > config file > auto-detection > default "main")
+    expected_base_branch = args.base_branch
+    base_branch_source = None
+    if expected_base_branch:
+        base_branch_source = "CLI argument"
+    elif cfg_data:
+        for k in (
+            "base_branch",
+            "base-branch",
+            "main_branch",
+            "main-branch",
+            "default_branch",
+            "default-branch",
+        ):
+            if k in cfg_data and isinstance(cfg_data[k], str):
+                expected_base_branch = cfg_data[k].strip()
+                base_branch_source = f"config file '{config_file}'"
+                break
+
+    # Resolve mergify config override from config file if available
+    if not mergify_config and cfg_data:
+        for k in ("mergify_config", "mergify-config", "mergify_path", "mergify-path"):
+            if k in cfg_data and isinstance(cfg_data[k], str):
+                mergify_config = cfg_data[k].strip()
+                break
 
     try:
         # 1. Fetch PR details
@@ -158,8 +197,20 @@ def main():
             logger.info(f"PR #{pr_number} is not merged. Skipping.")
             sys.exit(0)
 
-        if base_branch != args.base_branch:
-            logger.info(f"PR #{pr_number} targeted '{base_branch}', not '{args.base_branch}'. Skipping backport check.")
+        # Resolve expected base branch if not explicitly configured
+        if not expected_base_branch:
+            detected_branch = detect_repo_default_branch(repo=repo)
+            if detected_branch:
+                expected_base_branch = detected_branch
+                base_branch_source = "auto-detected from repository"
+            else:
+                expected_base_branch = "main"
+                base_branch_source = "default fallback"
+
+        logger.info(f"Recognized main branch: '{expected_base_branch}' ({base_branch_source})")
+
+        if base_branch != expected_base_branch:
+            logger.info(f"PR #{pr_number} targeted '{base_branch}', not '{expected_base_branch}'. Skipping backport check.")
             sys.exit(0)
 
         if not merge_commit:
@@ -188,6 +239,12 @@ def main():
             branch_filter=args.filter_branches,
             explicit_branches=explicit_branches,
         )
+        if not target_branches and not mergify_config and os.path.exists(".github/mergify.yml") and config_file != ".github/mergify.yml":
+            target_branches = get_maintained_branches(
+                mergify_path=".github/mergify.yml",
+                branch_filter=args.filter_branches,
+                explicit_branches=explicit_branches,
+            )
         if not target_branches:
             logger.info("No maintained branches discovered.")
             sys.exit(0)
@@ -239,7 +296,7 @@ def main():
 
             comment_body = (
                 f"### 🤖 Retrobranch Backport Verification Report\n\n"
-                f"This PR was merged into `{args.base_branch}` and evaluated for backporting to maintained branches:\n\n"
+                f"This PR was merged into `{expected_base_branch}` and evaluated for backporting to maintained branches:\n\n"
                 f"| Target Branch | Status | Details |\n"
                 f"| :--- | :--- | :--- |\n"
                 + "\n".join(table_rows)

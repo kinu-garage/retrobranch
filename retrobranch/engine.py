@@ -353,6 +353,61 @@ def fetch_pr_info(pr_number: Union[int, str], repo: Optional[str] = None) -> Dic
         raise GHCommandError(f"Failed to parse JSON response from GitHub CLI: {e}")
 
 
+def detect_repo_default_branch(repo: Optional[str] = None) -> Optional[str]:
+    """
+    Attempts to programmatically detect the remote repository's default / main branch.
+
+    Resolution strategy:
+    1. Local Git symbolic ref (`refs/remotes/origin/HEAD` or `refs/remotes/upstream/HEAD`)
+    2. Git remote symref query (`git ls-remote --symref <remote> HEAD`)
+    3. GitHub CLI (`gh repo view [<repo>] --json defaultBranchRef ...`)
+
+    Args:
+        repo: Optional repository in 'owner/name' format (e.g. 'kinu-garage/retrobranch').
+
+    Returns:
+        The detected default branch name (e.g. 'main', 'master', 'rolling'), or None if undetected.
+    """
+    # 1. Local Git symbolic ref (fast, offline)
+    for remote in ("origin", "upstream"):
+        try:
+            rc, stdout, _ = run_cmd(["git", "symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"])
+            if rc == 0 and stdout:
+                branch = stdout.strip()
+                prefix = f"{remote}/"
+                if branch.startswith(prefix):
+                    branch = branch[len(prefix):]
+                if branch:
+                    return branch
+        except Exception:
+            pass
+
+    # 2. Git remote symref query (Git protocol)
+    for remote in ("origin", "upstream"):
+        try:
+            rc, stdout, _ = run_cmd(["git", "ls-remote", "--symref", remote, "HEAD"])
+            if rc == 0 and stdout:
+                match = re.search(r"ref:\s*refs/heads/(\S+)\s+HEAD", stdout)
+                if match:
+                    return match.group(1).strip()
+        except Exception:
+            pass
+
+    # 3. GitHub CLI / API (authoritative repository settings on GitHub)
+    try:
+        cmd = ["gh", "repo", "view"]
+        if repo:
+            cmd.append(repo)
+        cmd.extend(["--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"])
+        rc, stdout, _ = run_cmd(cmd)
+        if rc == 0 and stdout:
+            return stdout.strip()
+    except Exception:
+        pass
+
+    return None
+
+
 def format_label(template: Optional[str], branch: str) -> str:
     """
     Formats a branch name into a label using a template string.
