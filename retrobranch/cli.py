@@ -90,6 +90,11 @@ def main():
     if not raw_pr:
         parser.error("PR number or URL is required. Example: 'retrobr 1234' or 'retrobr --pr 1234'")
 
+    repo = None
+    repo_match = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", str(raw_pr))
+    if repo_match:
+        repo = f"{repo_match.group(1)}/{repo_match.group(2)}"
+
     try:
         pr_number = parse_pr_number(raw_pr)
     except ValueError as e:
@@ -113,7 +118,11 @@ def main():
 
     try:
         # 1. Fetch PR details
-        pr_data = fetch_pr_info(pr_number)
+        pr_data = fetch_pr_info(pr_number, repo=repo)
+        if not repo and pr_data.get("url"):
+            url_match = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", pr_data["url"])
+            if url_match:
+                repo = f"{url_match.group(1)}/{url_match.group(2)}"
         title = pr_data.get("title", "")
         labels = [l["name"] for l in pr_data.get("labels", [])]
         head_branch = pr_data.get("headRefName", "")
@@ -185,7 +194,7 @@ def main():
 
         # 5. Apply labels for branches where issue is present
         for b, label_name in labels_to_add:
-            add_pr_label(pr_number, label_name, dry_run=args.dry_run)
+            add_pr_label(pr_number, label_name, repo=repo, dry_run=args.dry_run)
 
         # 6. If any branch was skipped due to issue not being present, post comment report
         if skipped_branches:
@@ -213,7 +222,7 @@ def main():
                 f"*Note: For skipped branches, the issue or code being addressed was not present. "
                 f"If this fix is still desired on a skipped branch, maintainers can apply the backport label manually.*"
             )
-            post_pr_comment(pr_number, comment_body, dry_run=args.dry_run)
+            post_pr_comment(pr_number, comment_body, repo=repo, dry_run=args.dry_run)
     except Exception as e:
         if getattr(args, "verbose", False):
             raise e

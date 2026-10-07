@@ -321,19 +321,20 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
     return True, f"Codebase and modified lines verified present in '{target_branch}'."
 
 
-def fetch_pr_info(pr_number: int) -> Dict[str, Any]:
+def fetch_pr_info(pr_number: Union[int, str], repo: Optional[str] = None) -> Dict[str, Any]:
     """Fetches PR metadata using GitHub CLI."""
+    cmd = [
+        "gh",
+        "pr",
+        "view",
+        str(pr_number),
+        "--json",
+        "number,title,labels,headRefName,mergeCommit,mergedAt,baseRefName,url",
+    ]
+    if repo:
+        cmd.extend(["-R", repo])
     try:
-        rc, stdout, stderr = run_cmd(
-            [
-                "gh",
-                "pr",
-                "view",
-                str(pr_number),
-                "--json",
-                "number,title,labels,headRefName,mergeCommit,mergedAt,baseRefName",
-            ]
-        )
+        rc, stdout, stderr = run_cmd(cmd)
     except Exception as e:
         raise GHCommandError(f"Could not execute 'gh' CLI. Is GitHub CLI installed? Details: {e}")
 
@@ -352,28 +353,66 @@ def fetch_pr_info(pr_number: int) -> Dict[str, Any]:
         raise GHCommandError(f"Failed to parse JSON response from GitHub CLI: {e}")
 
 
-def add_pr_label(pr_number: int, label: str, dry_run: bool = False) -> bool:
-    """Adds a label to the PR."""
+def add_pr_label(pr_number: int, label: str, repo: Optional[str] = None, dry_run: bool = False) -> bool:
+    """
+    Adds a label to the PR.
+    Uses the GitHub REST API via 'gh api' to avoid GraphQL deprecation errors (e.g. Projects classic).
+    Falls back to 'gh pr edit' if necessary.
+    """
     if dry_run:
         logger.info(f"[DRY-RUN] Adding label '{label}' to PR #{pr_number}")
         return True
-    rc, _, stderr = run_cmd(["gh", "pr", "edit", str(pr_number), "--add-label", label])
-    if rc != 0:
-        logger.error(f"Error adding label '{label}' to PR #{pr_number}: {stderr}")
-        return False
-    logger.info(f"Successfully added label '{label}' to PR #{pr_number}")
-    return True
+
+    # 1. Primary: Use GitHub REST API endpoint to avoid GraphQL query issues
+    endpoint = f"repos/{repo}/issues/{pr_number}/labels" if repo else f"repos/{{owner}}/{{repo}}/issues/{pr_number}/labels"
+    rc, stdout, stderr = run_cmd(["gh", "api", endpoint, "-f", f"labels[]={label}"])
+    if rc == 0:
+        logger.info(f"Successfully added label '{label}' to PR #{pr_number}")
+        return True
+
+    # If label does not exist in repository (HTTP 404), create it and retry
+    if "Not Found" in stderr or "404" in stderr or "Resource not found" in stderr:
+        create_endpoint = f"repos/{repo}/labels" if repo else "repos/{owner}/{repo}/labels"
+        run_cmd(["gh", "api", create_endpoint, "-f", f"name={label}"])
+        rc_retry, _, stderr_retry = run_cmd(["gh", "api", endpoint, "-f", f"labels[]={label}"])
+        if rc_retry == 0:
+            logger.info(f"Successfully created and added label '{label}' to PR #{pr_number}")
+            return True
+
+    # 2. Fallback to standard 'gh pr edit'
+    edit_cmd = ["gh", "pr", "edit", str(pr_number), "--add-label", label]
+    if repo:
+        edit_cmd.extend(["-R", repo])
+    rc_edit, _, stderr_edit = run_cmd(edit_cmd)
+    if rc_edit == 0:
+        logger.info(f"Successfully added label '{label}' to PR #{pr_number}")
+        return True
+
+    logger.error(f"Error adding label '{label}' to PR #{pr_number}: {stderr} (fallback error: {stderr_edit})")
+    return False
 
 
-def post_pr_comment(pr_number: int, comment_body: str, dry_run: bool = False) -> bool:
+def post_pr_comment(pr_number: int, comment_body: str, repo: Optional[str] = None, dry_run: bool = False) -> bool:
     """Posts a comment on the PR."""
     if dry_run:
         logger.info(f"[DRY-RUN] Posting comment on PR #{pr_number}:\n{comment_body}")
         return True
-    rc, _, stderr = run_cmd(["gh", "pr", "comment", str(pr_number), "--body", comment_body])
-    if rc != 0:
-        logger.error(f"Error posting comment to PR #{pr_number}: {stderr}")
-        return False
-    logger.info(f"Successfully posted comment on PR #{pr_number}")
-    return True
+
+    cmd = ["gh", "pr", "comment", str(pr_number), "--body", comment_body]
+    if repo:
+        cmd.extend(["-R", repo])
+    rc, _, stderr = run_cmd(cmd)
+    if rc == 0:
+        logger.info(f"Successfully posted comment on PR #{pr_number}")
+        return True
+
+    # Fallback to GitHub REST API via gh api
+    endpoint = f"repos/{repo}/issues/{pr_number}/comments" if repo else f"repos/{{owner}}/{{repo}}/issues/{pr_number}/comments"
+    rc_api, _, stderr_api = run_cmd(["gh", "api", endpoint, "-f", f"body={comment_body}"])
+    if rc_api == 0:
+        logger.info(f"Successfully posted comment on PR #{pr_number} (via REST API fallback)")
+        return True
+
+    logger.error(f"Error posting comment to PR #{pr_number}: {stderr} (fallback error: {stderr_api})")
+    return False
 

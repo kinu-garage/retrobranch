@@ -15,10 +15,12 @@ sys.path.insert(0, PACKAGE_DIR)
 
 from retrobranch.cli import parse_pr_number
 from retrobranch.engine import (
+    add_pr_label,
     do_modified_lines_exist_in_target,
     fetch_pr_info,
     get_maintained_branches,
     is_feature_pr,
+    post_pr_comment,
     run_cmd,
     was_commit_previously_backported,
 )
@@ -308,6 +310,74 @@ class TestPreviousBackportCheck(unittest.TestCase):
             mock_cmd.return_value = (0, "", "")
             was_bp, _ = was_commit_previously_backported("123456789abcdef", "origin/release-1.0")
             self.assertFalse(was_bp)
+
+
+class TestPRInteractions(unittest.TestCase):
+    """Tests add_pr_label, post_pr_comment, and repo targeting."""
+
+    def test_dry_run_label(self):
+        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+            res = add_pr_label(1234, "backport-release-1.0", dry_run=True)
+            self.assertTrue(res)
+            mock_cmd.assert_not_called()
+
+    def test_add_pr_label_rest_success(self):
+        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+            mock_cmd.return_value = (0, "[]", "")
+            res = add_pr_label(3593, "backport-humble", repo="moveit/moveit2")
+            self.assertTrue(res)
+            mock_cmd.assert_called_once_with([
+                "gh", "api", "repos/moveit/moveit2/issues/3593/labels", "-f", "labels[]=backport-humble"
+            ])
+
+    def test_add_pr_label_fallback_to_edit(self):
+        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+            # First call to gh api fails (e.g. unknown API error)
+            # Second call to gh pr edit succeeds
+            mock_cmd.side_effect = [
+                (1, "", "API error"),
+                (0, "", "")
+            ]
+            res = add_pr_label(3593, "backport-humble", repo="moveit/moveit2")
+            self.assertTrue(res)
+            self.assertEqual(mock_cmd.call_count, 2)
+            self.assertEqual(mock_cmd.call_args_list[1][0][0], [
+                "gh", "pr", "edit", "3593", "--add-label", "backport-humble", "-R", "moveit/moveit2"
+            ])
+
+    def test_add_pr_label_auto_create_when_missing(self):
+        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+            # First call: 404 Not Found
+            # Second call: create label succeeds
+            # Third call: add label succeeds
+            mock_cmd.side_effect = [
+                (1, "", "404 Not Found"),
+                (0, "", ""),
+                (0, "", "")
+            ]
+            res = add_pr_label(3593, "backport-new", repo="moveit/moveit2")
+            self.assertTrue(res)
+            self.assertEqual(mock_cmd.call_count, 3)
+
+    def test_post_pr_comment_success(self):
+        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+            mock_cmd.return_value = (0, "", "")
+            res = post_pr_comment(3593, "Backport report", repo="moveit/moveit2")
+            self.assertTrue(res)
+            mock_cmd.assert_called_once_with([
+                "gh", "pr", "comment", "3593", "--body", "Backport report", "-R", "moveit/moveit2"
+            ])
+
+    def test_fetch_pr_info_with_repo(self):
+        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+            mock_cmd.return_value = (0, '{"number": 3593, "title": "test", "url": "https://github.com/moveit/moveit2/pull/3593"}', "")
+            data = fetch_pr_info(3593, repo="moveit/moveit2")
+            self.assertEqual(data["number"], 3593)
+            mock_cmd.assert_called_once_with([
+                "gh", "pr", "view", "3593", "--json",
+                "number,title,labels,headRefName,mergeCommit,mergedAt,baseRefName,url",
+                "-R", "moveit/moveit2"
+            ])
 
 
 if __name__ == "__main__":
