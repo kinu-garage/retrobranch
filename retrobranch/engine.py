@@ -2,12 +2,15 @@
 Core qualification, ancestry verification, and labeling logic for Retrobranch.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 import re
 import subprocess
 import sys
+from typing import Any, Dict, List, Optional, Tuple, Union
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -45,13 +48,13 @@ def run_cmd(cmd, cwd=None, check=False):
 
 
 def get_maintained_branches(
-    mergify_path: str = None,
-    config_path: str = None,
+    mergify_path: Optional[str] = None,
+    config_path: Optional[str] = None,
     source_type: str = "auto",
-    branch_filter: str = None,
-    explicit_branches: list[str] = None,
-    sources: list = None,
-) -> list[str]:
+    branch_filter: Optional[str] = None,
+    explicit_branches: Optional[List[str]] = None,
+    sources: Optional[List[Any]] = None,
+) -> List[str]:
     """
     Discovers target backport branches from one or more branch sources.
 
@@ -107,7 +110,7 @@ def get_maintained_branches(
     return discovered_branches
 
 
-def is_feature_pr(title: str, labels: list[str] = None, head_branch: str = None) -> tuple[bool, str]:
+def is_feature_pr(title: str, labels: Optional[List[str]] = None, head_branch: Optional[str] = None) -> Tuple[bool, str]:
     """
     Determines if a PR is a feature / capability (which should NOT be automatically backported).
     Returns (is_feature: bool, reason: str).
@@ -155,7 +158,7 @@ def is_feature_pr(title: str, labels: list[str] = None, head_branch: str = None)
     return False, "PR is a bugfix, maintenance, or non-feature change (eligible for backporting)"
 
 
-def was_commit_previously_backported(commit_sha: str, target_ref: str) -> tuple[bool, str]:
+def was_commit_previously_backported(commit_sha: str, target_ref: str) -> Tuple[bool, str]:
     """
     Checks if commit_sha (or its associated PR) was previously backported to target_ref.
     """
@@ -178,7 +181,7 @@ def was_commit_previously_backported(commit_sha: str, target_ref: str) -> tuple[
     return False, "No previous backport found in target branch log"
 
 
-def do_modified_lines_exist_in_target(target_ref: str, file_path: str, deleted_lines: list[str]) -> bool:
+def do_modified_lines_exist_in_target(target_ref: str, file_path: str, deleted_lines: List[str]) -> bool:
     """
     Checks if non-trivial lines being modified/deleted by the PR exist in target_ref:file_path.
     """
@@ -193,7 +196,7 @@ def do_modified_lines_exist_in_target(target_ref: str, file_path: str, deleted_l
     return matches >= len(meaningful) * 0.5
 
 
-def verify_issue_presence_in_branch(commit: str, target_branch: str) -> tuple[bool, str]:
+def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bool, str]:
     """
     Verifies if the issue/problem addressed by commit is present in origin/<target_branch>.
 
@@ -318,7 +321,7 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> tuple[bo
     return True, f"Codebase and modified lines verified present in '{target_branch}'."
 
 
-def fetch_pr_info(pr_number: int) -> dict:
+def fetch_pr_info(pr_number: int) -> Dict[str, Any]:
     """Fetches PR metadata using GitHub CLI."""
     try:
         rc, stdout, stderr = run_cmd(
