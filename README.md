@@ -7,86 +7,30 @@ Retrobranch acts as a pre-flight qualification layer for backport automation. Be
 > [!NOTE]
 > **Merged PR/MR Focus:** Retrobranch exclusively evaluates **merged Pull/Merge Requests (PRs/MRs)** rather than raw git commits. Merged PRs have undergone a review process, establishing a level of trustworthiness and providing rich metadata (PR title, labels, head branch name) essential for accurate backport qualification.
 
-## Table of Contents
+## Table of contents
 
-- [The Problem](#the-problem)
-- [Architecture: Qualification vs. Execution](#architecture-qualification-vs-execution)
-  - [Qualification Logic & Rationale](#qualification-logic--rationale)
-  - [Why GitHub CLI (`gh`) and Authentication Are Required](#why-github-cli-gh-and-authentication-are-required)
+- [The problem](#the-problem)
 - [Usage](#usage)
   - [🚀 Usage in GitHub Actions](#-usage-in-github-actions)
-  - [Local CLI Usage & PyPI Package Installation](#local-cli-usage--pypi-package-installation)
-  - [Building PyPI Distributions](#building-pypi-distributions)
-- [⚙️ Configuration & Inputs](#%EF%B8%8F-configuration--inputs)
-  - [GitHub Action Inputs](#github-action-inputs)
-- [Generic Maintained Branch Sources](#generic-maintained-branch-sources)
-  - [Python API Example](#python-api-example)
-- [Running Tests](#running-tests)
+  - [Local CLI installation & usage](#local-cli-installation--usage)
+  - [Building PyPI distributions](#building-pypi-distributions)
+- [⚙️ Configuration & inputs](#%EF%B8%8F-configuration--inputs)
+  - [GitHub Action inputs](#github-action-inputs)
+- [Architecture: Qualification vs. execution](#architecture-qualification-vs-execution)
+  - [Qualification logic & rationale](#qualification-logic--rationale)
+  - [Why GitHub CLI (`gh`) and authentication are required](#why-github-cli-gh-and-authentication-are-required)
+  - [Generic maintained branch sources](#generic-maintained-branch-sources)
+    - [Python API example](#python-api-example)
+- [Running tests](#running-tests)
 - [License](#license)
 
-## The Problem
+## The problem
 
 Some backporting tools e.g., Mergify, `backport-action`, `git-backporting`, are execution engines: they execute cherry-picks and open pull requests whenever a triggering label on a pull request page is attached (label may reads e.g. `backport-X` where X is the target branch name). The steps in backporting that might not be covered by those tools are:
 1. *Should this PR be backported at all?* (e.g., skipping features, breaking changes, dependency bumps).
 2. *Does the bug/problem actually exist in the target/release branch `X`?* If a bug was in code added to `main` 6 months after `branch-previous` split off, cherry-picking it to `branch-previous` will either fail with merge conflicts or corrupt the older release.
 
 Without Retrobranch, maintainers must manually investigate commit histories and apply backport labels by hand.
-
-## Architecture: Qualification vs. Execution
-
-Retrobranch sits *upstream* of your backport execution bot:
-
-```mermaid
-flowchart TD
-    A["PR Merged into main"] --> B{"Is PR a Feature / Capability?<br/>(labels, 'feat:' prefix, branch name)"}
-    B -- "YES" --> C["Skip: Features not backported"]
-    B -- "NO" --> D["Discover Target Branches<br/>(Mergify config or --target-branches)"]
-
-    subgraph Verify ["Target Branch Verification"]
-        D --> E{"Do target directories exist<br/>for all added files?"}
-        E -- "NO" --> S["Skip Branch"]
-        E -- "YES" --> F{"Are there modified / deleted files?"}
-        F -- "NO (pure new files)" --> V["Issue Present (Qualified)"]
-        F -- "YES" --> G{"Do modified files exist in target?"}
-        G -- "NO" --> S
-        G -- "YES" --> H{"Did changed code exist in target?<br/>(Predates branch point OR<br/>previously backported OR lines match)"}
-        H -- "NO" --> S
-        H -- "YES" --> V
-    end
-
-    V --> L["Add 'backport-<branch>' label"]
-    L --> M["(Delegated to Execution Engine of repos choice (Mergify, etc.)<br/>opens backport PR)"]
-    S --> N["Post Report Comment on PR<br/>explaining which branches were skipped"]
-```
-
-### Qualification Logic & Rationale
-
-Retrobranch evaluates PRs for backporting using a two-stage qualification process:
-
-#### 1. Stage 1: Feature Classification (Upfront Filter)
-Before inspecting code diffs, Retrobranch evaluates PR metadata (title prefixes like `feat:`, labels like `enhancement`, and head branch names like `feat/*`).
-* **Features are skipped upfront** across all target branches.
-* **Rationale**: Backports are reserved for bug fixes and maintenance patches. Eliminating feature PRs upfront ensures that newly added files in bugfix PRs (such as new unit test cases or missing patch configs) are trusted as valid parts of a fix.
-
-#### 2. Stage 2: Target Branch Verification & File Ancestry
-For PRs classified as bug fixes or maintenance patches:
-* **Newly Added Files (`A`)**: Line-ancestry checks (`git blame`) only apply to pre-existing code being modified or deleted. For brand-new files, Retrobranch verifies that the file's parent directory exists in target branch `X`. If the directory exists, adding the new file is safe; if the directory is missing, backporting to that branch is skipped.
-* **Modified / Deleted Files (`M` / `D`)**: Verifies that modified files exist in target branch `X`, and uses `git blame` and merge-base ancestry to confirm that the lines being patched actually existed when target branch `X` split off (or were previously backported).
-
-### Why GitHub CLI (`gh`) and authentication are required
-
-Retrobranch relies on the **GitHub CLI (`gh`)** for API operations, and requires authentication (`GH_TOKEN` or `gh auth login`).
-
-#### 1. Why GitHub CLI (`gh`) is needed
-While local Git tracks code history and diffs, GitHub-specific pull request metadata is not stored in the local Git repository. Retrobranch requires `gh` to:
-* **Fetch PR's metadata**: Retrieve PR title (e.g. `feat:` vs `fix:`), attached labels, head branch name (`feat/*`), merge commit SHA, target base branch, and merge status.
-* **Apply backport labels**: Automatically attach `backport-<branch>` labels (TBD if user can specify the name of the labels) to qualified PRs on GitHub so execution bots (e.g. Mergify) open backport PRs.
-* **Post report comments**: Post verification summary reports directly onto the PR explaining which branches were skipped.
-
-#### 2. Why authentication is required
-* **GitHub API rate limits & access**: Querying PR metadata via GitHub APIs requires an authenticated GitHub token (`GH_TOKEN` or `github.token` in Actions).
-* **Write permissions**: Modifying PR labels (`gh pr edit`) and posting comments (`gh pr comment`) requires write permissions on pull requests.
-* **Private repository support**: Fetching PR metadata on private or enterprise repositories requires an authenticated session.
 
 ## Usage
 ### 🚀 Usage in GitHub Actions
@@ -147,9 +91,11 @@ jobs:
 
 ---
 
-### Local CLI usage & PyPI package installation
+### Local CLI installation & usage
 
 Retrobranch can be installed locally as a PyPI package or built into standard distribution formats (`.whl` and `.tar.gz`). It is recommended to install into a Python virtual environment (`venv`). The CLI executable is named **`retrobr`** (with `retrobranch` maintained as an alias):
+
+Insallation:
 
 ```bash
 # Clone and navigate to the repository
@@ -168,17 +114,23 @@ export GH_TOKEN=$(gh auth token)
 Command samples:
 ```bash
 # Evaluate by PR number using retrobr executable
+# Find the given #PR in the remote of the local repo.
+cd %YOUR_LOCAL_REPO%
 retrobr 1234 --dry-run
 
-# Or evaluate by full GitHub PR URL
+# Or evaluate by full GitHub PR URL. You don't need to be in the local repo of the remote repo in the command arg.
 retrobr https://github.com/owner/repo/pull/1234 --dry-run
 
 # Custom target branches or config file
 retrobr 1234 --target-branches "release-2.0,release-1.0" --dry-run
 retrobr -p 1234 --config-file .github/maintained_branches.yml --dry-run
+
+# Custom backport label pattern (default: 'backport-{branch}')
+retrobr 1234 --label-template "cherry-pick:{branch}" --dry-run
+retrobr 1234 --label-template "bp/{branch}" --dry-run
 ```
 
-### Building PyPI Distributions
+### Building PyPI distributions
 
 To build PyPI standard Wheel (`.whl`) and Source Distribution (`.tar.gz`) packages for local distribution or publishing:
 
@@ -188,9 +140,9 @@ python3 -m build
 # Built artifacts created in dist/retrobranch-0.1.0-py3-none-any.whl and dist/retrobranch-0.1.0.tar.gz
 ```
 
-## ⚙️ Configuration & Inputs
+## ⚙️ Configuration & inputs
 
-### GitHub Action Inputs
+### GitHub Action inputs
 
 | Input | Description | Required | Default |
 | :--- | :--- | :---: | :--- |
@@ -203,9 +155,66 @@ python3 -m build
 | `source-type` | Format type for `config-file` (`auto`, `mergify`, `yaml`, `json`, `text`) | No | `auto` |
 | `mergify-config` | Legacy path to Mergify configuration file (alias for `config-file`) | No | `""` |
 | `dry-run` | Evaluate without modifying labels or commenting | No | `false` |
+| `label-template` | Template pattern for backport labels (supports `{branch}`, `{target}`, `%s`) | No | `backport-{branch}` |
 | `github-token` | GitHub token for CLI / API calls | No | `${{ github.token }}` |
 
-## Generic Maintained Branch Sources
+## Architecture: Qualification vs. execution
+
+Retrobranch sits *upstream* of your backport execution bot:
+
+```mermaid
+flowchart TD
+    A["PR Merged into main"] --> B{"Is PR a Feature / Capability?<br/>(labels, 'feat:' prefix, branch name)"}
+    B -- "YES" --> C["Skip: Features not backported"]
+    B -- "NO" --> D["Discover Target Branches<br/>(Mergify config or --target-branches)"]
+
+    subgraph Verify ["Target Branch Verification"]
+        D --> E{"Do target directories exist<br/>for all added files?"}
+        E -- "NO" --> S["Skip Branch"]
+        E -- "YES" --> F{"Are there modified / deleted files?"}
+        F -- "NO (pure new files)" --> V["Issue Present (Qualified)"]
+        F -- "YES" --> G{"Do modified files exist in target?"}
+        G -- "NO" --> S
+        G -- "YES" --> H{"Did changed code exist in target?<br/>(Predates branch point OR<br/>previously backported OR lines match)"}
+        H -- "NO" --> S
+        H -- "YES" --> V
+    end
+
+    V --> L["Add 'backport-<branch>' label"]
+    L --> M["(Delegated to Execution Engine of repos choice (Mergify, etc.)<br/>opens backport PR)"]
+    S --> N["Post Report Comment on PR<br/>explaining which branches were skipped"]
+```
+
+### Qualification logic & rationale
+
+Retrobranch evaluates PRs for backporting using a two-stage qualification process:
+
+#### 1. Stage 1: Feature classification (upfront filter)
+Before inspecting code diffs, Retrobranch evaluates PR metadata (title prefixes like `feat:`, labels like `enhancement`, and head branch names like `feat/*`).
+* **Features are skipped upfront** across all target branches.
+* **Rationale**: Backports are reserved for bug fixes and maintenance patches. Eliminating feature PRs upfront ensures that newly added files in bugfix PRs (such as new unit test cases or missing patch configs) are trusted as valid parts of a fix.
+
+#### 2. Stage 2: Target branch verification & file ancestry
+For PRs classified as bug fixes or maintenance patches:
+* **Newly Added Files (`A`)**: Line-ancestry checks (`git blame`) only apply to pre-existing code being modified or deleted. For brand-new files, Retrobranch verifies that the file's parent directory exists in target branch `X`. If the directory exists, adding the new file is safe; if the directory is missing, backporting to that branch is skipped.
+* **Modified / Deleted Files (`M` / `D`)**: Verifies that modified files exist in target branch `X`, and uses `git blame` and merge-base ancestry to confirm that the lines being patched actually existed when target branch `X` split off (or were previously backported).
+
+### Why GitHub CLI (`gh`) and authentication are required
+
+Retrobranch relies on the **GitHub CLI (`gh`)** for API operations, and requires authentication (`GH_TOKEN` or `gh auth login`).
+
+#### 1. Why GitHub CLI (`gh`) is needed
+While local Git tracks code history and diffs, GitHub-specific pull request metadata is not stored in the local Git repository. Retrobranch requires `gh` to:
+* **Fetch PR's metadata**: Retrieve PR title (e.g. `feat:` vs `fix:`), attached labels, head branch name (`feat/*`), merge commit SHA, target base branch, and merge status.
+* **Apply backport labels**: Automatically attach `backport-<branch>` labels (TBD if user can specify the name of the labels) to qualified PRs on GitHub so execution bots (e.g. Mergify) open backport PRs.
+* **Post report comments**: Post verification summary reports directly onto the PR explaining which branches were skipped.
+
+#### 2. Why authentication is required
+* **GitHub API rate limits & access**: Querying PR metadata via GitHub APIs requires an authenticated GitHub token (`GH_TOKEN` or `github.token` in Actions).
+* **Write permissions**: Modifying PR labels (`gh pr edit`) and posting comments (`gh pr comment`) requires write permissions on pull requests.
+* **Private repository support**: Fetching PR metadata on private or enterprise repositories requires an authenticated session.
+
+### Generic maintained branch sources
 
 Retrobranch supports multiple pluggable sources for discovering maintained target branches:
 
@@ -216,7 +225,7 @@ Retrobranch supports multiple pluggable sources for discovering maintained targe
 5. **Custom Python Callables / Classes**: Custom sources implementing `BaseBranchSource` or returning `list[str]`.
 6. **Composite Sources**: Combine multiple discovery sources seamlessly.
 
-### Python API Example
+### Python API example
 
 ```python
 from retrobranch import get_maintained_branches, BaseBranchSource, GenericFileBranchSource
@@ -233,7 +242,7 @@ branches = get_maintained_branches(
 )
 ```
 
-## Running Tests
+## Running tests
 
 Retrobranch includes a full unit test suite that tests classification, branch discovery, and ancestry heuristics in `<0.01s` without requiring tokens or network access:
 

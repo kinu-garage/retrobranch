@@ -18,6 +18,7 @@ from retrobranch.engine import (
     add_pr_label,
     do_modified_lines_exist_in_target,
     fetch_pr_info,
+    format_label,
     get_maintained_branches,
     is_feature_pr,
     post_pr_comment,
@@ -378,6 +379,39 @@ class TestPRInteractions(unittest.TestCase):
                 "number,title,labels,headRefName,mergeCommit,mergedAt,baseRefName,url",
                 "-R", "moveit/moveit2"
             ])
+
+
+class TestLabelFormatting(unittest.TestCase):
+    """Tests format_label template customization."""
+
+    def test_default_template(self):
+        self.assertEqual(format_label(None, "humble"), "backport-humble")
+        self.assertEqual(format_label("", "humble"), "backport-humble")
+
+    def test_branch_placeholder(self):
+        self.assertEqual(format_label("backport-{branch}", "humble"), "backport-humble")
+        self.assertEqual(format_label("cherry-pick:{branch}", "jazzy"), "cherry-pick:jazzy")
+        self.assertEqual(format_label("bp/{branch}", "kilted"), "bp/kilted")
+
+    def test_target_placeholder(self):
+        self.assertEqual(format_label("bp-{target}", "humble"), "bp-humble")
+        self.assertEqual(format_label("backport-{target_branch}", "jazzy"), "backport-jazzy")
+
+    def test_percent_s_placeholder(self):
+        self.assertEqual(format_label("backport-%s", "humble"), "backport-humble")
+        self.assertEqual(format_label("bp/%s", "rolling"), "bp/rolling")
+
+    def test_empty_braces(self):
+        self.assertEqual(format_label("backport-{}", "humble"), "backport-humble")
+
+    def test_prefix_with_separator(self):
+        self.assertEqual(format_label("backport-", "humble"), "backport-humble")
+        self.assertEqual(format_label("bp/", "humble"), "bp/humble")
+        self.assertEqual(format_label("cherry-pick:", "humble"), "cherry-pick:humble")
+        self.assertEqual(format_label("backport_", "humble"), "backport_humble")
+
+    def test_static_label(self):
+        self.assertEqual(format_label("needs-backport", "humble"), "needs-backport")
 
 
 if __name__ == "__main__":

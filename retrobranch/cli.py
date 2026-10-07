@@ -3,10 +3,12 @@ import logging
 import os
 import re
 import sys
+import yaml
 
 from .engine import (
     add_pr_label,
     fetch_pr_info,
+    format_label,
     get_maintained_branches,
     is_feature_pr,
     post_pr_comment,
@@ -78,6 +80,13 @@ def main():
         default=None,
         help="Optional comma-separated list of branch names to filter against (e.g. 'release-2.0,release-1.0')",
     )
+    parser.add_argument(
+        "--label-template",
+        "--label-pattern",
+        type=str,
+        default=None,
+        help="Template pattern for backport labels (default: 'backport-{branch}'). Supports '{branch}', '{target}', or '%%s'.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode without modifying labels or commenting")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print detailed debug tracebacks on error")
 
@@ -115,6 +124,22 @@ def main():
             if os.path.exists(default_path):
                 config_file = default_path
                 break
+
+    # Resolve label template (CLI flag > config file > default "backport-{branch}")
+    label_template = args.label_template
+    if not label_template and config_file and os.path.exists(config_file):
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                cfg_data = yaml.safe_load(f)
+                if isinstance(cfg_data, dict):
+                    for k in ("label_template", "label-template", "label_pattern", "label-pattern"):
+                        if k in cfg_data and isinstance(cfg_data[k], str):
+                            label_template = cfg_data[k]
+                            break
+        except Exception:
+            pass
+    if not label_template:
+        label_template = "backport-{branch}"
 
     try:
         # 1. Fetch PR details
@@ -178,14 +203,14 @@ def main():
         skipped_branches = []
 
         for b in target_branches:
-            label_name = f"backport-{b}"
+            label_name = format_label(label_template, b)
             if label_name in labels:
                 logger.info(f"Branch '{b}' already has label '{label_name}'. Skipping check.")
-                branch_results[b] = (True, "Label already present on PR", True)
+                branch_results[b] = (True, "Label already present on PR", True, label_name)
                 continue
 
             is_present, reason = verify_issue_presence_in_branch(merge_commit, b)
-            branch_results[b] = (is_present, reason, False)
+            branch_results[b] = (is_present, reason, False, label_name)
 
             if is_present:
                 labels_to_add.append((b, label_name))
@@ -199,8 +224,8 @@ def main():
         # 6. If any branch was skipped due to issue not being present, post comment report
         if skipped_branches:
             table_rows = []
-            for b, (is_present, reason, already_had) in branch_results.items():
-                lbl = f"`backport-{b}`"
+            for b, (is_present, reason, already_had, label_name) in branch_results.items():
+                lbl = f"`{label_name}`"
                 if already_had:
                     status = "ℹ️ Already present"
                     detail = "Label was already attached to the PR."

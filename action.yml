@@ -42,6 +42,10 @@ inputs:
     description: 'Dry run mode (evaluate without adding labels or posting comments)'
     required: false
     default: 'false'
+  label-template:
+    description: 'Template pattern for backport labels (default: "backport-{branch}"). Supports {branch}, {target}, %s'
+    required: false
+    default: ''
   github-token:
     description: 'GitHub token for GitHub CLI and API access'
     required: false
@@ -86,6 +90,9 @@ runs:
         fi
         if [ -n "${{ inputs.source-type }}" ]; then
           CMD="$CMD --source-type ${{ inputs.source-type }}"
+        fi
+        if [ -n "${{ inputs.label-template }}" ]; then
+          CMD="$CMD --label-template '${{ inputs.label-template }}'"
         fi
         if [ "${{ inputs.dry-run }}" = "true" ]; then
           CMD="$CMD --dry-run"

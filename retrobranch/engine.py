@@ -353,6 +353,39 @@ def fetch_pr_info(pr_number: Union[int, str], repo: Optional[str] = None) -> Dic
         raise GHCommandError(f"Failed to parse JSON response from GitHub CLI: {e}")
 
 
+def format_label(template: Optional[str], branch: str) -> str:
+    """
+    Formats a branch name into a label using a template string.
+
+    Supports placeholders:
+    - '{branch}', '{target}', '{target_branch}'
+    - '{}'
+    - '%s'
+    If no placeholder is present:
+    - If template ends with a separator ('-', '_', '/', ':'), appends branch name.
+    - Otherwise returns template formatted with branch if possible or template as-is.
+
+    Args:
+        template: The template string (e.g. 'backport-{branch}', 'backport-%s', 'bp/{branch}').
+        branch: The target branch name (e.g. 'humble').
+
+    Returns:
+        str: Formatted label name (e.g. 'backport-humble').
+    """
+    if not template:
+        template = "backport-{branch}"
+
+    if "%s" in template:
+        return template % branch
+    if "{}" in template:
+        return template.format(branch)
+    if "{branch}" in template or "{target}" in template or "{target_branch}" in template:
+        return template.format(branch=branch, target=branch, target_branch=branch)
+    if template.endswith(("-", "_", "/", ":")):
+        return f"{template}{branch}"
+    return template
+
+
 def add_pr_label(pr_number: int, label: str, repo: Optional[str] = None, dry_run: bool = False) -> bool:
     """
     Adds a label to the PR.
