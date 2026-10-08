@@ -13,7 +13,6 @@ from unittest.mock import patch
 PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PACKAGE_DIR)
 
-from retrobranch.cli import parse_pr_number
 from retrobranch.engine import (
     add_pr_label,
     do_modified_lines_exist_in_target,
@@ -21,6 +20,7 @@ from retrobranch.engine import (
     format_label,
     get_maintained_branches,
     is_feature_pr,
+    parse_pr_number,
     post_pr_comment,
     run_subproc,
     was_commit_previously_backported,
