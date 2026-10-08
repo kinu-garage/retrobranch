@@ -602,7 +602,88 @@ class TestDetectRepoDefaultBranch(unittest.TestCase):
             self.assertIsNone(branch)
 
 
+class TestPathPatternTargetBranches(unittest.TestCase):
+    """Tests interfaces for modifying PATH_PATTERN_TARGET_BRANCHES."""
+
+    def tearDown(self):
+        from retrobranch.engine import reset_path_pattern_target_branches
+        reset_path_pattern_target_branches()
+
+    def test_overwrite_with_list_of_path_patterns(self):
+        from retrobranch.engine import (
+            modify_path_pattern_target_branches,
+            get_path_pattern_target_branches,
+            set_path_pattern_target_branches,
+        )
+        custom_list = [".github/custom.yml", "configs/branches.txt"]
+        result = modify_path_pattern_target_branches(custom_list)
+        self.assertEqual(result, custom_list)
+        self.assertEqual(get_path_pattern_target_branches(), custom_list)
+
+        # Using set_path_pattern_target_branches
+        new_list = ["one.yml", "two.yml"]
+        result2 = set_path_pattern_target_branches(new_list)
+        self.assertEqual(result2, new_list)
+        self.assertEqual(get_path_pattern_target_branches(), new_list)
+
+    def test_append_list_of_path_patterns(self):
+        from retrobranch.engine import (
+            modify_path_pattern_target_branches,
+            add_path_pattern_target_branches,
+            get_path_pattern_target_branches,
+            DEFAULT_PATH_PATTERN_TARGET_BRANCHES,
+        )
+        extra_patterns = ["custom_appended.yml", "another.yml"]
+        result = modify_path_pattern_target_branches(extra_patterns, append=True)
+        expected = list(DEFAULT_PATH_PATTERN_TARGET_BRANCHES) + extra_patterns
+        self.assertEqual(result, expected)
+        self.assertEqual(get_path_pattern_target_branches(), expected)
+
+        # Using add_path_pattern_target_branches (defaults to append)
+        more_patterns = ["third.yml"]
+        result2 = add_path_pattern_target_branches(more_patterns)
+        self.assertEqual(result2, expected + more_patterns)
+
+    def test_add_single_entry(self):
+        from retrobranch.engine import (
+            add_path_pattern_target_branch,
+            modify_path_pattern_target_branches,
+            get_path_pattern_target_branches,
+            DEFAULT_PATH_PATTERN_TARGET_BRANCHES,
+        )
+        single = "single_config.yml"
+        result = add_path_pattern_target_branch(single)
+        expected = list(DEFAULT_PATH_PATTERN_TARGET_BRANCHES) + [single]
+        self.assertEqual(result, expected)
+        self.assertEqual(get_path_pattern_target_branches(), expected)
+
+        # Adding single string via modify_path_pattern_target_branches with append=True
+        single2 = "another_single.yml"
+        result2 = modify_path_pattern_target_branches(single2, append=True)
+        self.assertEqual(result2, expected + [single2])
+
+    def test_reset_path_patterns(self):
+        from retrobranch.engine import (
+            modify_path_pattern_target_branches,
+            reset_path_pattern_target_branches,
+            get_path_pattern_target_branches,
+            DEFAULT_PATH_PATTERN_TARGET_BRANCHES,
+        )
+        modify_path_pattern_target_branches(["temporary.yml"])
+        self.assertEqual(get_path_pattern_target_branches(), ["temporary.yml"])
+
+        reset_result = reset_path_pattern_target_branches()
+        self.assertEqual(reset_result, list(DEFAULT_PATH_PATTERN_TARGET_BRANCHES))
+        self.assertEqual(get_path_pattern_target_branches(), list(DEFAULT_PATH_PATTERN_TARGET_BRANCHES))
+
+    def test_invalid_type_raises_type_error(self):
+        from retrobranch.engine import modify_path_pattern_target_branches
+        with self.assertRaises(TypeError):
+            modify_path_pattern_target_branches(123)  # type: ignore
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 

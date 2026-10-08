@@ -12,7 +12,7 @@ import os
 import re
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -21,15 +21,137 @@ from . import exceptions
 from . import sources as branch_sources
 
 
-PATH_PATTERN_TARGET_BRANCHES = [
-            ".github/retrobranch.yml",
-            ".retrobranch.yml",
-            ".github/mergify.yml",
-            ".github/maintained_branches.yml",
-            ".github/branches.txt",
-            "maintained_branches.yml",
-            "branches.txt",
-        ]
+DEFAULT_PATH_PATTERN_TARGET_BRANCHES = [
+    ".github/retrobranch.yml",
+    ".retrobranch.yml",
+    ".github/mergify.yml",
+    ".github/maintained_branches.yml",
+    ".github/branches.txt",
+    "maintained_branches.yml",
+    "branches.txt",
+]
+
+PATH_PATTERN_TARGET_BRANCHES = list(DEFAULT_PATH_PATTERN_TARGET_BRANCHES)
+
+
+def modify_path_pattern_target_branches(
+    patterns: Union[str, Sequence[str]],
+    append: bool = False,
+    overwrite: Optional[bool] = None,
+) -> List[str]:
+    """
+    Modifies the global PATH_PATTERN_TARGET_BRANCHES list.
+
+    Args:
+        patterns: A single path pattern string or a sequence (list, tuple) of path patterns.
+        append: If True, appends the pattern(s) to the existing list.
+                If False (default), overwrites the list.
+        overwrite: Optional boolean. If provided, overrides append (overwrite=True means append=False,
+                   and overwrite=False means append=True).
+
+    Returns:
+        The updated PATH_PATTERN_TARGET_BRANCHES list.
+
+    Examples:
+        # Overwrite with a list of patterns:
+        modify_path_pattern_target_branches(["custom.yml", "configs/branches.txt"])
+
+        # Append a list of patterns to the existing list:
+        modify_path_pattern_target_branches(["more.yml"], append=True)
+
+        # Add a single entry (appends to existing list):
+        modify_path_pattern_target_branches("single.yml", append=True)
+    """
+    global PATH_PATTERN_TARGET_BRANCHES
+
+    if overwrite is not None:
+        append = not overwrite
+
+    if isinstance(patterns, str):
+        new_items = [patterns.strip()]
+    elif isinstance(patterns, (list, tuple, set)):
+        new_items = [str(p).strip() for p in patterns if str(p).strip()]
+    else:
+        raise TypeError(f"patterns must be a str or a sequence of str, got {type(patterns).__name__}")
+
+    if append:
+        for item in new_items:
+            if item not in PATH_PATTERN_TARGET_BRANCHES:
+                PATH_PATTERN_TARGET_BRANCHES.append(item)
+    else:
+        PATH_PATTERN_TARGET_BRANCHES = list(new_items)
+
+    return PATH_PATTERN_TARGET_BRANCHES
+
+
+def set_path_pattern_target_branches(
+    patterns: Union[str, Sequence[str]],
+    append: bool = False,
+) -> List[str]:
+    """
+    Sets or updates PATH_PATTERN_TARGET_BRANCHES (overwrites by default).
+
+    Args:
+        patterns: A single path pattern or a sequence of path patterns.
+        append: If True, appends instead of overwriting. Default is False.
+
+    Returns:
+        The updated PATH_PATTERN_TARGET_BRANCHES list.
+    """
+    return modify_path_pattern_target_branches(patterns, append=append)
+
+
+def add_path_pattern_target_branches(
+    patterns: Union[str, Sequence[str]],
+    overwrite: bool = False,
+) -> List[str]:
+    """
+    Adds path pattern(s) to PATH_PATTERN_TARGET_BRANCHES (appends by default).
+
+    Args:
+        patterns: A single path pattern or a sequence of path patterns to append.
+        overwrite: If True, overwrites the existing list instead. Default is False.
+
+    Returns:
+        The updated PATH_PATTERN_TARGET_BRANCHES list.
+    """
+    return modify_path_pattern_target_branches(patterns, append=not overwrite)
+
+
+def add_path_pattern_target_branch(
+    pattern: str,
+    append: bool = True,
+) -> List[str]:
+    """
+    Adds a single path pattern entry to PATH_PATTERN_TARGET_BRANCHES.
+
+    Args:
+        pattern: A single path pattern string to add.
+        append: If True (default), appends to the list; if False, replaces the list.
+
+    Returns:
+        The updated PATH_PATTERN_TARGET_BRANCHES list.
+    """
+    return modify_path_pattern_target_branches(pattern, append=append)
+
+
+def reset_path_pattern_target_branches() -> List[str]:
+    """
+    Resets PATH_PATTERN_TARGET_BRANCHES to its default configuration.
+
+    Returns:
+        The reset PATH_PATTERN_TARGET_BRANCHES list.
+    """
+    global PATH_PATTERN_TARGET_BRANCHES
+    PATH_PATTERN_TARGET_BRANCHES = list(DEFAULT_PATH_PATTERN_TARGET_BRANCHES)
+    return PATH_PATTERN_TARGET_BRANCHES
+
+
+def get_path_pattern_target_branches() -> List[str]:
+    """
+    Returns a copy of the current PATH_PATTERN_TARGET_BRANCHES list.
+    """
+    return list(PATH_PATTERN_TARGET_BRANCHES)
 
 
 def run_subproc(cmd, cwd=None, check=False):
