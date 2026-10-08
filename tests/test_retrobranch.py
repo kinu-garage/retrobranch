@@ -17,6 +17,7 @@ from retrobranch.engine import (
     add_pr_label,
     do_modified_lines_exist_in_target,
     fetch_pr_info,
+    fetch_remote_file_content,
     format_label,
     get_maintained_branches,
     is_feature_pr,
@@ -40,6 +41,7 @@ from retrobranch.sources import (
     ExplicitBranchSource,
     GenericFileBranchSource,
     MergifyBranchSource,
+    RawContentBranchSource,
 )
 
 
@@ -200,6 +202,33 @@ class TestBranchSources(unittest.TestCase):
         src2 = ExplicitBranchSource(["release-2.0", "release-1.0"])  # duplicate release-1.0
         composite = CompositeBranchSource([src1, src2])
         self.assertEqual(composite.get_branches(), ["release-1.0", "release-2.0"])
+
+    def test_raw_content_yaml_list_source(self):
+        content = "- humble\n- jazzy\n- kilted\n"
+        src = RawContentBranchSource(content)
+        self.assertEqual(src.get_branches(), ["humble", "jazzy", "kilted"])
+
+    def test_raw_content_mergify_source(self):
+        content = """
+pull_request_rules:
+  - name: backport to humble
+    actions:
+      backport:
+        branches:
+          - humble
+  - name: backport to jazzy
+    actions:
+      backport:
+        branches:
+          - jazzy
+"""
+        src = RawContentBranchSource(content)
+        self.assertEqual(src.get_branches(), ["humble", "jazzy"])
+
+    def test_raw_content_text_source(self):
+        content = "# target branches\nhumble\njazzy\n"
+        src = RawContentBranchSource(content, format_type="text")
+        self.assertEqual(src.get_branches(), ["humble", "jazzy"])
 
 
 class TestMaintainedBranches(unittest.TestCase):
@@ -490,7 +519,7 @@ class TestBaseBranchConfig(unittest.TestCase):
                 main()
             mock_detect.assert_called_once_with(repo="owner/repo")
             mock_verify.assert_called_once_with("abcdef1234567890", "test-ci")
-            self.assertTrue(any("Recognized main branch: 'rolling' (auto-detected from repository)" in msg for msg in cm.output))
+            self.assertTrue(any("Recognized main branch: 'rolling' (auto-detected branch 'rolling' from repository: https://github.com/owner/repo)" in msg for msg in cm.output))
 
     def test_cli_falls_back_to_main_when_auto_detect_returns_none(self):
         from retrobranch.cli import main
@@ -601,6 +630,40 @@ class TestDetectRepoDefaultBranch(unittest.TestCase):
             branch = detect_repo_default_branch(repo="owner/repo")
             self.assertIsNone(branch)
 
+    def test_detect_with_repo_ignores_unrelated_local_git_repo(self):
+        from retrobranch.engine import detect_repo_default_branch
+
+        def mock_run(cmd, *args, **kwargs):
+            # Local directory belongs to unrelated repo with 'origin/develop'
+            if cmd[:3] == ["git", "remote", "get-url"]:
+                return (0, "https://github.com/unrelated/hut_10sqft.git", "")
+            if cmd[:3] == ["git", "symbolic-ref", "--short"]:
+                return (0, "origin/develop", "")
+            # gh repo view queries the target repository
+            if cmd[:4] == ["gh", "repo", "view", "moveit/moveit2"]:
+                return (0, "main", "")
+            return (1, "", "")
+
+        with patch("retrobranch.engine.run_subproc", side_effect=mock_run):
+            branch = detect_repo_default_branch(repo="moveit/moveit2")
+            self.assertEqual(branch, "main")
+
+    def test_detect_with_repo_from_ls_remote(self):
+        from retrobranch.engine import detect_repo_default_branch
+
+        def mock_run(cmd, *args, **kwargs):
+            # gh fails
+            if cmd[:3] == ["gh", "repo", "view"]:
+                return (1, "", "")
+            # git ls-remote queries target repo URL directly
+            if cmd[:3] == ["git", "ls-remote", "--symref"] and "https://github.com/moveit/moveit2" in cmd:
+                return (0, "ref: refs/heads/main\tHEAD\na9004a43\tHEAD", "")
+            return (1, "", "")
+
+        with patch("retrobranch.engine.run_subproc", side_effect=mock_run):
+            branch = detect_repo_default_branch(repo="moveit/moveit2")
+            self.assertEqual(branch, "main")
+
 
 class TestPathPatternTargetBranches(unittest.TestCase):
     """Tests interfaces for modifying PATH_PATTERN_TARGET_BRANCHES."""
@@ -682,8 +745,198 @@ class TestPathPatternTargetBranches(unittest.TestCase):
             modify_path_pattern_target_branches(123)  # type: ignore
 
 
+class TestGetRepoUrl(unittest.TestCase):
+    """Tests repository URL resolution and normalization."""
+
+    def test_repo_url_from_pr_url(self):
+        from retrobranch.engine import get_repo_url
+        url = get_repo_url(pr_url="https://github.com/owner/repo/pull/123")
+        self.assertEqual(url, "https://github.com/owner/repo")
+
+    def test_repo_url_from_repo_slug(self):
+        from retrobranch.engine import get_repo_url
+        url = get_repo_url(repo="owner/repo")
+        self.assertEqual(url, "https://github.com/owner/repo")
+
+    def test_repo_url_from_gh_cli(self):
+        from retrobranch.engine import get_repo_url
+
+        def mock_run(cmd, *args, **kwargs):
+            if cmd[:3] == ["gh", "repo", "view"]:
+                return (0, "https://github.com/cli-owner/cli-repo", "")
+            return (1, "", "")
+
+        with patch("retrobranch.engine.run_subproc", side_effect=mock_run):
+            url = get_repo_url()
+            self.assertEqual(url, "https://github.com/cli-owner/cli-repo")
+
+    def test_repo_url_from_git_remote_ssh(self):
+        from retrobranch.engine import get_repo_url
+
+        def mock_run(cmd, *args, **kwargs):
+            if cmd[:3] == ["git", "remote", "get-url"]:
+                return (0, "git@github.com:ssh-owner/ssh-repo.git", "")
+            return (1, "", "")
+
+        with patch("retrobranch.engine.run_subproc", side_effect=mock_run):
+            url = get_repo_url()
+            self.assertEqual(url, "https://github.com/ssh-owner/ssh-repo")
+
+    def test_repo_url_from_git_remote_https(self):
+        from retrobranch.engine import get_repo_url
+
+        def mock_run(cmd, *args, **kwargs):
+            if cmd[:3] == ["git", "remote", "get-url"]:
+                return (0, "https://github.com/https-owner/https-repo.git", "")
+            return (1, "", "")
+
+        with patch("retrobranch.engine.run_subproc", side_effect=mock_run):
+            url = get_repo_url()
+            self.assertEqual(url, "https://github.com/https-owner/https-repo")
+
+    def test_repo_url_all_fail_returns_none(self):
+        from retrobranch.engine import get_repo_url
+
+        with patch("retrobranch.engine.run_subproc", return_value=(1, "", "")):
+            url = get_repo_url()
+            self.assertIsNone(url)
+
+
+class TestFetchRemoteFileContent(unittest.TestCase):
+    """Tests fetching file contents remotely via GitHub API."""
+
+    def test_fetch_remote_file_content_success(self):
+        import base64
+        import json
+        raw_text = "maintained_branches:\n  - humble\n"
+        encoded = base64.b64encode(raw_text.encode("utf-8")).decode("utf-8")
+        mock_json = json.dumps({"content": encoded})
+
+        with patch("retrobranch.engine.run_subproc", return_value=(0, mock_json, "")) as mock_cmd:
+            content = fetch_remote_file_content("owner/repo", ".github/retrobranch.yml")
+            self.assertEqual(content, raw_text)
+            mock_cmd.assert_called_once_with(["gh", "api", "repos/owner/repo/contents/.github/retrobranch.yml"])
+
+    def test_fetch_remote_file_content_with_ref(self):
+        import base64
+        import json
+        raw_text = "target"
+        encoded = base64.b64encode(raw_text.encode("utf-8")).decode("utf-8")
+        mock_json = json.dumps({"content": encoded})
+
+        with patch("retrobranch.engine.run_subproc", return_value=(0, mock_json, "")) as mock_cmd:
+            content = fetch_remote_file_content("owner/repo", ".github/retrobranch.yml", ref="mybranch")
+            self.assertEqual(content, raw_text)
+            mock_cmd.assert_called_once_with(
+                ["gh", "api", "repos/owner/repo/contents/.github/retrobranch.yml", "-f", "ref=mybranch"]
+            )
+
+    def test_fetch_remote_file_content_failure(self):
+        with patch("retrobranch.engine.run_subproc", return_value=(1, "", "Not Found")):
+            content = fetch_remote_file_content("owner/repo", "nonexistent.yml")
+            self.assertIsNone(content)
+
+
+class TestRemoteConfigPrioritization(unittest.TestCase):
+    """Tests that remote config is prioritized when PR URL is provided and elaborated messages are logged."""
+
+    def test_remote_config_prioritized_when_pr_url_provided(self):
+        from retrobranch.cli import main
+        mock_pr = {
+            "number": 100,
+            "title": "fix: bugfix",
+            "labels": [],
+            "headRefName": "fix-1",
+            "baseRefName": "main",
+            "mergeCommit": {"oid": "abcdef1234567890"},
+            "mergedAt": "2026-10-07T12:00:00Z",
+            "url": "https://github.com/remoteowner/remoterepo/pull/100",
+        }
+
+        def mock_fetch_remote(repo, candidate, ref=None):
+            if repo == "remoteowner/remoterepo" and candidate == ".github/retrobranch.yml":
+                return "branches:\n  - remote-ci\n"
+            return None
+
+        def mock_run_cmd(cmd, *args, **kwargs):
+            if "ls-remote" in cmd:
+                return (0, "refs/heads/remote-ci\nrefs/heads/local-ci", "")
+            return (0, "", "")
+
+        with patch("sys.argv", ["retrobr", "https://github.com/remoteowner/remoterepo/pull/100", "--dry-run"]), \
+             patch("retrobranch.engine.fetch_pr_info", return_value=mock_pr), \
+             patch("retrobranch.engine.detect_repo_default_branch", return_value="main"), \
+             patch("retrobranch.engine.fetch_remote_file_content", side_effect=mock_fetch_remote), \
+             patch("retrobranch.engine.verify_issue_presence_in_branch", return_value=(True, "matched")) as mock_verify, \
+             patch("retrobranch.engine.run_subproc", side_effect=mock_run_cmd):
+            with self.assertLogs("retrobranch", level="INFO") as cm:
+                main()
+            mock_verify.assert_called_once_with("abcdef1234567890", "remote-ci", cwd=unittest.mock.ANY)
+            self.assertTrue(any("Discovered target branches: ['remote-ci']" in msg for msg in cm.output))
+
+    def test_remote_no_branches_discovered_logs_elaborated_message(self):
+        from retrobranch.cli import main
+        mock_pr = {
+            "number": 100,
+            "title": "fix: bugfix",
+            "labels": [],
+            "headRefName": "fix-1",
+            "baseRefName": "main",
+            "mergeCommit": {"oid": "abcdef1234567890"},
+            "mergedAt": "2026-10-07T12:00:00Z",
+            "url": "https://github.com/remoteowner/remoterepo/pull/100",
+        }
+
+        with patch("sys.argv", ["retrobr", "https://github.com/remoteowner/remoterepo/pull/100", "--dry-run"]), \
+             patch("retrobranch.engine.fetch_pr_info", return_value=mock_pr), \
+             patch("retrobranch.engine.detect_repo_default_branch", return_value="main"), \
+             patch("retrobranch.engine.run_subproc", return_value=(0, "", "")), \
+             patch("retrobranch.engine.fetch_remote_file_content", return_value=None):
+            with self.assertLogs("retrobranch", level="INFO") as cm:
+                with self.assertRaises(SystemExit) as exit_ctx:
+                    main()
+            self.assertEqual(exit_ctx.exception.code, 0)
+            self.assertTrue(
+                any(
+                    "No maintained branches discovered for repository 'remoteowner/remoterepo' (checked remote config paths:"
+                    in msg
+                    for msg in cm.output
+                )
+            )
+
+    def test_local_no_branches_discovered_logs_elaborated_message(self):
+        from retrobranch.cli import main
+        mock_pr = {
+            "number": 100,
+            "title": "fix: bugfix",
+            "labels": [],
+            "headRefName": "fix-1",
+            "baseRefName": "main",
+            "mergeCommit": {"oid": "abcdef1234567890"},
+            "mergedAt": "2026-10-07T12:00:00Z",
+            "url": "https://github.com/owner/repo/pull/100",
+        }
+
+        with patch("sys.argv", ["retrobr", "100", "--dry-run"]), \
+             patch("retrobranch.engine.fetch_pr_info", return_value=mock_pr), \
+             patch("retrobranch.engine.detect_repo_default_branch", return_value="main"), \
+             patch("retrobranch.engine.run_subproc", return_value=(0, "", "")), \
+             patch("os.path.exists", return_value=False):
+            with self.assertLogs("retrobranch", level="INFO") as cm:
+                with self.assertRaises(SystemExit) as exit_ctx:
+                    main()
+            self.assertEqual(exit_ctx.exception.code, 0)
+            self.assertTrue(
+                any(
+                    "No maintained branches discovered in local repository" in msg and "checked local paths:" in msg
+                    for msg in cm.output
+                )
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

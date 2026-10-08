@@ -6,7 +6,7 @@ Provides a generic abstraction for discovering target backport branches from var
 from abc import ABC, abstractmethod
 import logging
 import os
-from typing import Callable, List, Union
+from typing import Any, Callable, List, Optional, Union
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,88 @@ class ExplicitBranchSource(BaseBranchSource):
         return list(self.branches)
 
 
+def parse_mergify_branches_from_data(mergify_yaml: Any) -> List[str]:
+    """Extracts target backport branches from parsed Mergify YAML data."""
+    branches = []
+    if isinstance(mergify_yaml, dict):
+        for rule in mergify_yaml.get("pull_request_rules", []):
+            if isinstance(rule, dict):
+                backport = rule.get("actions", {}).get("backport", {})
+                if isinstance(backport, dict):
+                    for b in backport.get("branches", []):
+                        if b and b not in branches:
+                            branches.append(str(b).strip())
+    return branches
+
+
+def parse_branches_from_content(content: str, format_type: str = "auto") -> List[str]:
+    """
+    Parses maintained branches from raw string content (Mergify YAML, generic YAML/JSON, or line-separated text).
+    """
+    if not content or not content.strip():
+        return []
+
+    format_type = (format_type or "auto").lower()
+
+    if format_type == "mergify":
+        try:
+            mergify_yaml = yaml.safe_load(content) or {}
+            return parse_mergify_branches_from_data(mergify_yaml)
+        except Exception as e:
+            logger.warning(f"Failed to parse Mergify YAML content: {e}")
+            return []
+
+    if format_type in ("auto", "yaml", "yml", "json"):
+        try:
+            data = yaml.safe_load(content)
+
+            # Check if it's Mergify configuration structure
+            if isinstance(data, dict) and "pull_request_rules" in data:
+                return parse_mergify_branches_from_data(data)
+
+            # Top-level list: ["release-1.0", "release-2.0"]
+            if isinstance(data, list):
+                return [str(item).strip() for item in data if item and str(item).strip()]
+
+            # Top-level dict: search for known branch keys
+            if isinstance(data, dict):
+                possible_keys = [
+                    "maintained_branches",
+                    "target_branches",
+                    "branches",
+                    "backport_branches",
+                    "maintained-branches",
+                    "target-branches",
+                    "backport-branches",
+                ]
+                for key in possible_keys:
+                    if key in data:
+                        val = data[key]
+                        if isinstance(val, list):
+                            return [str(item).strip() for item in val if item and str(item).strip()]
+                        elif isinstance(val, str):
+                            return [b.strip() for b in val.split(",") if b.strip()]
+        except Exception as e:
+            if format_type in ("yaml", "yml", "json"):
+                logger.warning(f"Failed to parse content as {format_type}: {e}")
+                return []
+
+    # Plain text file parsing (fallback or format_type in ("text", "txt", "auto"))
+    if format_type in ("auto", "text", "txt"):
+        lines = content.splitlines()
+        branches = []
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                parts = [p.strip() for p in line.split(",") if p.strip()]
+                for p in parts:
+                    if p not in branches:
+                        branches.append(p)
+        return branches
+
+    return []
+
+
 class MergifyBranchSource(BaseBranchSource):
     """Source for extracting target backport branches from mergify.yml configuration."""
 
@@ -50,21 +132,11 @@ class MergifyBranchSource(BaseBranchSource):
 
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
-                mergify_yaml = yaml.safe_load(f) or {}
+                content = f.read()
+            return parse_branches_from_content(content, "mergify")
         except Exception as e:
-            logger.warning(f"Failed to parse Mergify config '{self.config_path}': {e}")
+            logger.warning(f"Failed to read Mergify config '{self.config_path}': {e}")
             return []
-
-        branches = []
-        if isinstance(mergify_yaml, dict):
-            for rule in mergify_yaml.get("pull_request_rules", []):
-                if isinstance(rule, dict):
-                    backport = rule.get("actions", {}).get("backport", {})
-                    if isinstance(backport, dict):
-                        for b in backport.get("branches", []):
-                            if b and b not in branches:
-                                branches.append(str(b).strip())
-        return branches
 
 
 class GenericFileBranchSource(BaseBranchSource):
@@ -86,66 +158,27 @@ class GenericFileBranchSource(BaseBranchSource):
                 logger.warning(f"Branch config file '{self.file_path}' not found.")
             return []
 
-        if self.format_type == "mergify":
-            return MergifyBranchSource(self.file_path).get_branches()
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            return parse_branches_from_content(content, self.format_type)
+        except Exception as e:
+            logger.warning(f"Failed to read branch config file '{self.file_path}': {e}")
+            return []
 
-        # Try parsing YAML / JSON if format is auto, yaml, yml, or json
-        if self.format_type in ("auto", "yaml", "yml", "json"):
-            try:
-                with open(self.file_path, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f)
 
-                # Check if it's Mergify configuration structure
-                if isinstance(data, dict) and "pull_request_rules" in data:
-                    return MergifyBranchSource(self.file_path).get_branches()
+class RawContentBranchSource(BaseBranchSource):
+    """
+    Source for parsing target branches directly from raw in-memory content.
+    Used when configuration is fetched remotely via API or generated dynamically.
+    """
 
-                # Top-level list: ["release-1.0", "release-2.0"]
-                if isinstance(data, list):
-                    return [str(item).strip() for item in data if item and str(item).strip()]
+    def __init__(self, content: str, format_type: str = "auto"):
+        self.content = content
+        self.format_type = (format_type or "auto").lower()
 
-                # Top-level dict: search for known branch keys
-                if isinstance(data, dict):
-                    possible_keys = [
-                        "maintained_branches",
-                        "target_branches",
-                        "branches",
-                        "backport_branches",
-                        "maintained-branches",
-                        "target-branches",
-                        "backport-branches",
-                    ]
-                    for key in possible_keys:
-                        if key in data:
-                            val = data[key]
-                            if isinstance(val, list):
-                                return [str(item).strip() for item in val if item and str(item).strip()]
-                            elif isinstance(val, str):
-                                return [b.strip() for b in val.split(",") if b.strip()]
-            except Exception as e:
-                if self.format_type in ("yaml", "yml", "json"):
-                    logger.warning(f"Failed to parse file '{self.file_path}' as {self.format_type}: {e}")
-                    return []
-
-        # Plain text file parsing (fallback or format_type in ("text", "txt", "auto"))
-        if self.format_type in ("auto", "text", "txt"):
-            try:
-                with open(self.file_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                branches = []
-                for line in lines:
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        # If line contains comma separated values
-                        parts = [p.strip() for p in line.split(",") if p.strip()]
-                        for p in parts:
-                            if p not in branches:
-                                branches.append(p)
-                return branches
-            except Exception as e:
-                logger.warning(f"Failed to read text branch file '{self.file_path}': {e}")
-                return []
-
-        return []
+    def get_branches(self) -> List[str]:
+        return parse_branches_from_content(self.content, self.format_type)
 
 
 class CallableBranchSource(BaseBranchSource):

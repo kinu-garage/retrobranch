@@ -5,13 +5,16 @@ Core qualification, ancestry verification, and labeling logic for Retrobranch.
 from __future__ import annotations
 
 import argparse
+import base64
 from html import parser
 import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import yaml
 
@@ -175,6 +178,7 @@ def get_maintained_branches(
     branch_filter: Optional[str] = None,
     explicit_branches: Optional[List[str]] = None,
     sources: Optional[List[Any]] = None,
+    repo: Optional[str] = None,
 ) -> List[str]:
     """
     Discovers target backport branches from one or more branch sources.
@@ -186,6 +190,8 @@ def get_maintained_branches(
         branch_filter: Optional comma-separated list of branches to restrict evaluation to.
         explicit_branches: Optional list of branch names passed directly.
         sources: Optional list of BaseBranchSource instances, callables, or file paths.
+        repo: Optional target repository ('owner/name'). If provided and local repo does not match,
+              ls-remote queries the remote repo URL directly.
 
     Returns:
         list[str]: Discovered and validated target branches.
@@ -215,7 +221,10 @@ def get_maintained_branches(
     discovered_branches = branch_sources.CompositeBranchSource(source_list).get_branches()
 
     # Filter invalid branches e.g. non-existent on the remote origin
-    rc, stdout, _ = run_subproc(["git", "ls-remote", "--heads", "origin"])
+    remote_target = "origin"
+    if repo and not is_local_repo_for(repo):
+        remote_target = f"https://github.com/{repo}"
+    rc, stdout, _ = run_subproc(["git", "ls-remote", "--heads", remote_target])
     if rc == 0:
         remote_heads = [
             line.split("refs/heads/")[1]
@@ -279,22 +288,23 @@ def is_feature_pr(title: str, labels: Optional[List[str]] = None, head_branch: O
     return False, "PR is a bugfix, maintenance, or non-feature change (eligible for backporting)"
 
 
-def was_commit_previously_backported(commit_sha: str, target_ref: str) -> Tuple[bool, str]:
+def was_commit_previously_backported(commit_sha: str, target_ref: str, cwd: Optional[str] = None) -> Tuple[bool, str]:
     """
     Checks if commit_sha (or its associated PR) was previously backported to target_ref.
     """
     # 1. Search git log on target branch for cherry-pick metadata referencing the commit SHA
-    rc, stdout, _ = run_subproc(["git", "log", target_ref, f"--grep={commit_sha}", "-n", "1", "--oneline"])
+    rc, stdout, _ = run_subproc(["git", "log", target_ref, f"--grep={commit_sha}", "-n", "1", "--oneline"], cwd=cwd)
     if rc == 0 and stdout:
         return True, f"Commit {commit_sha[:9]} was previously backported in commit: {stdout}"
 
     # 2. Search git log on target branch for backport PR title referencing the original PR number
-    rc, commit_msg, _ = run_subproc(["git", "log", "-1", "--format=%s%n%b", commit_sha])
+    rc, commit_msg, _ = run_subproc(["git", "log", "-1", "--format=%s%n%b", commit_sha], cwd=cwd)
     if rc == 0 and commit_msg:
         pr_matches = re.findall(r"#(\d+)", commit_msg)
         for pr_num in pr_matches:
             rc, stdout, _ = run_subproc(
-                ["git", "log", target_ref, f"--grep=backport.*#{pr_num}", "-n", "1", "--oneline"]
+                ["git", "log", target_ref, f"--grep=backport.*#{pr_num}", "-n", "1", "--oneline"],
+                cwd=cwd,
             )
             if rc == 0 and stdout:
                 return True, f"Original PR #{pr_num} was previously backported in commit: {stdout}"
@@ -302,11 +312,13 @@ def was_commit_previously_backported(commit_sha: str, target_ref: str) -> Tuple[
     return False, "No previous backport found in target branch log"
 
 
-def do_modified_lines_exist_in_target(target_ref: str, file_path: str, deleted_lines: List[str]) -> bool:
+def do_modified_lines_exist_in_target(
+    target_ref: str, file_path: str, deleted_lines: List[str], cwd: Optional[str] = None
+) -> bool:
     """
     Checks if non-trivial lines being modified/deleted by the PR exist in target_ref:file_path.
     """
-    rc, content, _ = run_subproc(["git", "show", f"{target_ref}:{file_path}"])
+    rc, content, _ = run_subproc(["git", "show", f"{target_ref}:{file_path}"], cwd=cwd)
     if rc != 0:
         return False
     target_lines = set(line.strip() for line in content.splitlines() if line.strip())
@@ -317,7 +329,9 @@ def do_modified_lines_exist_in_target(target_ref: str, file_path: str, deleted_l
     return matches >= len(meaningful) * 0.5
 
 
-def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bool, str]:
+def verify_issue_presence_in_branch(
+    commit: str, target_branch: str, cwd: Optional[str] = None
+) -> Tuple[bool, str]:
     """
     Verifies if the issue/problem addressed by commit is present in origin/<target_branch>.
 
@@ -343,6 +357,7 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
     Args:
         commit: The commit hash to verify.
         target_branch: The target branch name. Validity of the branch name is NOT checked i.e. it must be validated by the caller.
+        cwd: Optional working directory for git operations.
 
     Returns:
         tuple[bool, str]: (is_present, reason)
@@ -350,13 +365,14 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
     ref = f"origin/{target_branch}"
 
     # Verify target branch exists in local git
-    rc, _, _ = run_subproc(["git", "rev-parse", "--verify", ref])
+    rc, _, _ = run_subproc(["git", "rev-parse", "--verify", ref], cwd=cwd)
     if rc != 0:
         return False, f"Target branch '{ref}' does not exist."
 
     # Check modified/deleted files in commit
     rc, stdout, stderr = run_subproc(
-        ["git", "diff-tree", "--no-commit-id", "--name-status", "-r", f"{commit}~1", commit]
+        ["git", "diff-tree", "--no-commit-id", "--name-status", "-r", f"{commit}~1", commit],
+        cwd=cwd,
     )
     if rc != 0:
         return False, f"Could not inspect diff for commit {commit}: {stderr}"
@@ -369,7 +385,7 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
     for f in added_files:
         dir_name = os.path.dirname(f)
         if dir_name:
-            rc, _, _ = run_subproc(["git", "cat-file", "-e", f"{ref}:{dir_name}"])
+            rc, _, _ = run_subproc(["git", "cat-file", "-e", f"{ref}:{dir_name}"], cwd=cwd)
             if rc != 0:
                 return (
                     False,
@@ -383,7 +399,7 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
     # Verify that pre-existing modified/deleted files exist in target branch
     missing_files = []
     for f in modified_files:
-        rc, _, _ = run_subproc(["git", "cat-file", "-e", f"{ref}:{f}"])
+        rc, _, _ = run_subproc(["git", "cat-file", "-e", f"{ref}:{f}"], cwd=cwd)
         if rc != 0:
             missing_files.append(f)
 
@@ -391,10 +407,10 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
         return False, f"Modified file(s) do not exist in '{target_branch}': {', '.join(missing_files)}"
 
     # Check code ancestry on modified lines
-    rc, merge_base, _ = run_subproc(["git", "merge-base", f"{commit}~1", ref])
+    rc, merge_base, _ = run_subproc(["git", "merge-base", f"{commit}~1", ref], cwd=cwd)
     if rc == 0 and merge_base:
         for f in modified_files:
-            rc, diff_out, _ = run_subproc(["git", "diff", "-U0", f"{commit}~1", commit, "--", f])
+            rc, diff_out, _ = run_subproc(["git", "diff", "-U0", f"{commit}~1", commit, "--", f], cwd=cwd)
             if rc != 0:
                 continue
 
@@ -411,26 +427,27 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
                     continue
 
                 rc, blame_out, _ = run_subproc(
-                    ["git", "blame", "-l", f"-L{start_line},{start_line+count-1}", f"{commit}~1", "--", f]
+                    ["git", "blame", "-l", f"-L{start_line},{start_line+count-1}", f"{commit}~1", "--", f],
+                    cwd=cwd,
                 )
                 if rc != 0:
                     continue
 
                 line_commits = [line.split()[0] for line in blame_out.splitlines() if line]
                 for c in set(line_commits):
-                    rc_anc, _, _ = run_subproc(["git", "merge-base", "--is-ancestor", c, ref])
+                    rc_anc, _, _ = run_subproc(["git", "merge-base", "--is-ancestor", c, ref], cwd=cwd)
                     if rc_anc != 0:
                         # c is not in target_branch ancestry. Was it introduced after merge_base?
-                        rc_after, _, _ = run_subproc(["git", "merge-base", "--is-ancestor", merge_base, c])
+                        rc_after, _, _ = run_subproc(["git", "merge-base", "--is-ancestor", merge_base, c], cwd=cwd)
                         if rc_after == 0 and c != merge_base:
                             # Check if commit c was previously backported to target branch
-                            was_bp, bp_detail = was_commit_previously_backported(c, ref)
+                            was_bp, bp_detail = was_commit_previously_backported(c, ref, cwd=cwd)
                             if was_bp:
                                 logger.info(f"  Target '{target_branch}': {bp_detail}")
                                 continue
 
                             # Check if the modified lines exist in target branch file
-                            if do_modified_lines_exist_in_target(ref, f, deleted_lines):
+                            if do_modified_lines_exist_in_target(ref, f, deleted_lines, cwd=cwd):
                                 continue
 
                             return (
@@ -474,21 +491,117 @@ def fetch_pr_info(pr_number: Union[int, str], repo: Optional[str] = None) -> Dic
         raise exceptions.GHCommandError(f"Failed to parse JSON response from GitHub CLI: {e}")
 
 
+def normalize_repo_url(url: str) -> Optional[str]:
+    """
+    Normalizes a git remote URL or PR URL to a canonical web URL (e.g. 'https://github.com/owner/repo').
+    """
+    if not url:
+        return None
+    url = url.strip()
+    if "/pull/" in url:
+        url = re.sub(r"/pull/\d+.*$", "", url)
+    url = re.sub(r"\.git/?$", "", url)
+
+    # Match ssh://git@host:port/path or ssh://git@host/path
+    ssh_proto_match = re.search(r"^ssh://(?:[^@]+@)?([^/:]+)(?::\d+)?/(.+)$", url)
+    if ssh_proto_match:
+        return f"https://{ssh_proto_match.group(1)}/{ssh_proto_match.group(2)}"
+
+    # Match git@host:path (SCP-like syntax)
+    scp_match = re.search(r"^(?:[^@]+@)?([^:]+):(.+)$", url)
+    if scp_match and not url.startswith("http://") and not url.startswith("https://"):
+        return f"https://{scp_match.group(1)}/{scp_match.group(2)}"
+
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+
+    return url
+
+
+def is_local_repo_for(repo: Optional[str]) -> bool:
+    """
+    Checks whether the local git repository remotes match the given repo.
+    """
+    if not repo:
+        return True
+    repo_clean = repo.lower().strip()
+    for remote in ("origin", "upstream"):
+        try:
+            rc, stdout, _ = run_subproc(["git", "remote", "get-url", remote])
+            if rc == 0 and stdout:
+                norm = normalize_repo_url(stdout.strip())
+                if norm and repo_clean in norm.lower():
+                    return True
+        except Exception:
+            pass
+    return False
+
+
 def detect_repo_default_branch(repo: Optional[str] = None) -> Optional[str]:
     """
     Attempts to programmatically detect the remote repository's default / main branch.
 
     Resolution strategy:
-    1. Local Git symbolic ref (`refs/remotes/origin/HEAD` or `refs/remotes/upstream/HEAD`)
-    2. Git remote symref query (`git ls-remote --symref <remote> HEAD`)
-    3. GitHub CLI (`gh repo view [<repo>] --json defaultBranchRef ...`)
+    - If `repo` is specified (e.g. 'moveit/moveit2'):
+      1. GitHub CLI for specified repository (`gh repo view <repo> --json defaultBranchRef ...`)
+      2. Git remote symref query over HTTPS (`git ls-remote --symref https://github.com/<repo> HEAD`)
+      3. Local Git symbolic ref ONLY IF the local working directory matches `repo`
+    - If `repo` is NOT specified (local repo context):
+      1. Local Git symbolic ref (`refs/remotes/origin/HEAD` or `refs/remotes/upstream/HEAD`)
+      2. Git remote symref query (`git ls-remote --symref <remote> HEAD`)
+      3. GitHub CLI (`gh repo view --json defaultBranchRef ...`)
 
     Args:
-        repo: Optional repository in 'owner/name' format (e.g. 'kinu-garage/retrobranch').
+        repo: Optional repository in 'owner/name' format (e.g. 'moveit/moveit2').
 
     Returns:
         The detected default branch name (e.g. 'main', 'master', 'rolling'), or None if undetected.
     """
+    if repo:
+        # 1. Authoritative GitHub CLI for the specified repository
+        try:
+            cmd = ["gh", "repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"]
+            rc, stdout, _ = run_subproc(cmd)
+            if rc == 0 and stdout:
+                return stdout.strip()
+        except Exception:
+            pass
+
+        # 2. Direct remote query via Git protocol for the specified repository
+        repo_urls = []
+        if repo.startswith("http://") or repo.startswith("https://"):
+            repo_urls.append(repo)
+        else:
+            repo_urls.append(f"https://github.com/{repo}")
+
+        for target_url in repo_urls:
+            try:
+                rc, stdout, _ = run_subproc(["git", "ls-remote", "--symref", target_url, "HEAD"])
+                if rc == 0 and stdout:
+                    match = re.search(r"ref:\s*refs/heads/(\S+)\s+HEAD", stdout)
+                    if match:
+                        return match.group(1).strip()
+            except Exception:
+                pass
+
+        # 3. Only consult local git remotes if the local repo actually belongs to repo
+        if is_local_repo_for(repo):
+            for remote in ("origin", "upstream"):
+                try:
+                    rc, stdout, _ = run_subproc(["git", "symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"])
+                    if rc == 0 and stdout:
+                        branch = stdout.strip()
+                        prefix = f"{remote}/"
+                        if branch.startswith(prefix):
+                            branch = branch[len(prefix):]
+                        if branch:
+                            return branch
+                except Exception:
+                    pass
+
+        return None
+
+    # When repo is None (running in local directory without explicit repo):
     # 1. Local Git symbolic ref (fast, offline)
     for remote in ("origin", "upstream"):
         try:
@@ -514,18 +627,87 @@ def detect_repo_default_branch(repo: Optional[str] = None) -> Optional[str]:
         except Exception:
             pass
 
-    # 3. GitHub CLI / API (authoritative repository settings on GitHub)
+    # 3. GitHub CLI / API for current directory
     try:
-        cmd = ["gh", "repo", "view"]
-        if repo:
-            cmd.append(repo)
-        cmd.extend(["--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"])
+        cmd = ["gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"]
         rc, stdout, _ = run_subproc(cmd)
         if rc == 0 and stdout:
             return stdout.strip()
     except Exception:
         pass
 
+    return None
+
+
+def get_repo_url(repo: Optional[str] = None, pr_url: Optional[str] = None) -> Optional[str]:
+    """
+    Resolves the canonical repository web URL (e.g. 'https://github.com/owner/repo').
+
+    Strategy:
+    1. Extract and normalize from pr_url if provided.
+    2. Format from repo ('owner/name') if provided.
+    3. Query GitHub CLI ('gh repo view').
+    4. Query local git remote URLs ('origin', 'upstream').
+    """
+    if pr_url:
+        normalized = normalize_repo_url(pr_url)
+        if normalized:
+            return normalized
+
+    if repo and "/" in repo:
+        return f"https://github.com/{repo}"
+
+    # Try gh repo view
+    try:
+        cmd = ["gh", "repo", "view"]
+        if repo:
+            cmd.append(repo)
+        cmd.extend(["--json", "url", "-q", ".url"])
+        rc, stdout, _ = run_subproc(cmd)
+        if rc == 0 and stdout:
+            return normalize_repo_url(stdout.strip())
+    except Exception:
+        pass
+
+    # Try git remotes (origin, upstream)
+    for remote in ("origin", "upstream"):
+        try:
+            rc, stdout, _ = run_subproc(["git", "remote", "get-url", remote])
+            if rc == 0 and stdout:
+                normalized = normalize_repo_url(stdout.strip())
+                if normalized:
+                    return normalized
+        except Exception:
+            pass
+
+    return None
+
+
+def fetch_remote_file_content(repo: str, file_path: str, ref: Optional[str] = None) -> Optional[str]:
+    """
+    Fetches the content of a file from a remote GitHub repository via GitHub CLI / REST API.
+
+    Args:
+        repo: Repository in 'owner/name' format (e.g. 'moveit/moveit2').
+        file_path: Relative file path in the repository (e.g. '.github/mergify.yml').
+        ref: Optional branch or commit ref to fetch from.
+
+    Returns:
+        The decoded text content of the file, or None if not found or on error.
+    """
+    endpoint = f"repos/{repo}/contents/{file_path}"
+    cmd = ["gh", "api", endpoint]
+    if ref:
+        cmd.extend(["-f", f"ref={ref}"])
+    try:
+        rc, stdout, _ = run_subproc(cmd)
+        if rc == 0 and stdout:
+            data = json.loads(stdout)
+            if isinstance(data, dict) and data.get("content"):
+                content_bytes = base64.b64decode(data["content"])
+                return content_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        pass
     return None
 
 
@@ -645,71 +827,17 @@ def do(args: argparse.ArgumentParser, raw_pr: str):
     logging.basicConfig(level=log_level, format="%(message)s")
 
     repo = None
+    is_pr_url = False
     repo_match = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", str(raw_pr))
     if repo_match:
         repo = f"{repo_match.group(1)}/{repo_match.group(2)}"
+        is_pr_url = True
 
     try:
         pr_number = parse_pr_number(raw_pr)
     except ValueError as e:
         logger.error(f"Error: {e}")
         sys.exit(1)
-
-    # Auto-detect config file if none specified explicitly
-    config_file = args.config_file
-    mergify_config = args.mergify_config
-    if not config_file and not mergify_config and not args.target_branches:
-        for default_path in PATH_PATTERN_TARGET_BRANCHES:
-            if os.path.exists(default_path):
-                config_file = default_path
-                break
-
-    # Load configuration from config file if available
-    cfg_data = None
-    if config_file and os.path.exists(config_file):
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                loaded = yaml.safe_load(f)
-                if isinstance(loaded, dict):
-                    cfg_data = loaded
-        except Exception as e:
-            logger.warning(f"Failed to read config file '{config_file}': {e}")
-
-    # Resolve label template (CLI flag > config file > default "backport-{branch}")
-    label_template = args.label_template
-    if not label_template and cfg_data:
-        for k in ("label_template", "label-template", "label_pattern", "label-pattern"):
-            if k in cfg_data and isinstance(cfg_data[k], str):
-                label_template = cfg_data[k]
-                break
-    if not label_template:
-        label_template = "backport-{branch}"
-
-    # Resolve base branch (CLI flag > config file > auto-detection > default "main")
-    expected_base_branch = args.base_branch
-    base_branch_source = None
-    if expected_base_branch:
-        base_branch_source = "CLI argument"
-    elif cfg_data:
-        for k in (
-            "base_branch",
-            "base-branch",
-            "main_branch",
-            "main-branch",
-            "default_branch",
-            "default-branch",
-        ):
-            if k in cfg_data and isinstance(cfg_data[k], str):
-                expected_base_branch = cfg_data[k].strip()
-                base_branch_source = f"config file '{config_file}'"
-                break
-
-    # Resolve mergify config override from config file if available
-    if not mergify_config and cfg_data:
-        for k in ("mergify_config", "mergify-config", "mergify_path", "mergify-path"):
-            if k in cfg_data and isinstance(cfg_data[k], str):
-                mergify_config = cfg_data[k].strip()
-                break
 
     try:
         # 1. Fetch PR details
@@ -728,12 +856,118 @@ def do(args: argparse.ArgumentParser, raw_pr: str):
             logger.info(f"PR #{pr_number} is not merged. Skipping.")
             sys.exit(0)
 
+        # Config file discovery & loading:
+        # When a URL of the PR is given by the user, prioritize it as the source of repo config.
+        # Use the local repo ONLY when that's the only source we can find (e.g. only PR number is given).
+        config_file = args.config_file
+        mergify_config = args.mergify_config
+        remote_config_content = None
+        checked_config_paths = []
+        cfg_data = None
+
+        if is_pr_url and repo:
+            if config_file:
+                if os.path.exists(config_file):
+                    try:
+                        with open(config_file, "r", encoding="utf-8") as f:
+                            cfg_data = yaml.safe_load(f)
+                    except Exception as e:
+                        logger.warning(f"Failed to read config file '{config_file}': {e}")
+                else:
+                    remote_config_content = fetch_remote_file_content(repo, config_file)
+                    if remote_config_content:
+                        try:
+                            loaded = yaml.safe_load(remote_config_content)
+                            if isinstance(loaded, dict):
+                                cfg_data = loaded
+                        except Exception as e:
+                            logger.warning(f"Failed to parse remote config '{config_file}': {e}")
+            elif mergify_config:
+                if os.path.exists(mergify_config):
+                    try:
+                        with open(mergify_config, "r", encoding="utf-8") as f:
+                            remote_config_content = f.read()
+                    except Exception as e:
+                        logger.warning(f"Failed to read mergify config '{mergify_config}': {e}")
+                else:
+                    remote_config_content = fetch_remote_file_content(repo, mergify_config)
+            elif not args.target_branches:
+                for candidate in PATH_PATTERN_TARGET_BRANCHES:
+                    checked_config_paths.append(candidate)
+                    content = fetch_remote_file_content(repo, candidate)
+                    if content is not None:
+                        config_file = candidate
+                        remote_config_content = content
+                        try:
+                            loaded = yaml.safe_load(content)
+                            if isinstance(loaded, dict):
+                                cfg_data = loaded
+                        except Exception as e:
+                            logger.warning(f"Failed to parse remote config '{candidate}' from '{repo}': {e}")
+                        break
+        else:
+            if not config_file and not mergify_config and not args.target_branches:
+                for candidate in PATH_PATTERN_TARGET_BRANCHES:
+                    checked_config_paths.append(candidate)
+                    if os.path.exists(candidate):
+                        config_file = candidate
+                        break
+
+            if config_file and os.path.exists(config_file):
+                try:
+                    with open(config_file, "r", encoding="utf-8") as f:
+                        loaded = yaml.safe_load(f)
+                        if isinstance(loaded, dict):
+                            cfg_data = loaded
+                except Exception as e:
+                    logger.warning(f"Failed to read config file '{config_file}': {e}")
+
+        # Resolve label template (CLI flag > config file > default "backport-{branch}")
+        label_template = args.label_template
+        if not label_template and cfg_data:
+            for k in ("label_template", "label-template", "label_pattern", "label-pattern"):
+                if k in cfg_data and isinstance(cfg_data[k], str):
+                    label_template = cfg_data[k]
+                    break
+        if not label_template:
+            label_template = "backport-{branch}"
+
+        # Resolve base branch (CLI flag > config file > auto-detection > default "main")
+        expected_base_branch = args.base_branch
+        base_branch_source = None
+        if expected_base_branch:
+            base_branch_source = "CLI argument"
+        elif cfg_data:
+            for k in (
+                "base_branch",
+                "base-branch",
+                "main_branch",
+                "main-branch",
+                "default_branch",
+                "default-branch",
+            ):
+                if k in cfg_data and isinstance(cfg_data[k], str):
+                    expected_base_branch = cfg_data[k].strip()
+                    base_branch_source = f"config file '{config_file}'"
+                    break
+
+        # Resolve mergify config override from config file if available
+        if not mergify_config and cfg_data:
+            for k in ("mergify_config", "mergify-config", "mergify_path", "mergify-path"):
+                if k in cfg_data and isinstance(cfg_data[k], str):
+                    mergify_config = cfg_data[k].strip()
+                    break
+
         # Resolve expected base branch if not explicitly configured
         if not expected_base_branch:
             detected_branch = detect_repo_default_branch(repo=repo)
             if detected_branch:
                 expected_base_branch = detected_branch
-                base_branch_source = "auto-detected from repository"
+                repo_url = get_repo_url(repo=repo, pr_url=pr_data.get("url"))
+                if repo_url:
+                    base_branch_source = f"auto-detected branch '{detected_branch}' from repository: {repo_url}"
+                else:
+                    base_branch_source = f"auto-detected branch '{detected_branch}' from repository"
             else:
                 expected_base_branch = "main"
                 base_branch_source = "default fallback"
@@ -763,79 +997,132 @@ def do(args: argparse.ArgumentParser, raw_pr: str):
         if args.target_branches:
             explicit_branches = [b.strip() for b in args.target_branches.split(",") if b.strip()]
 
-        target_branches = get_maintained_branches(
-            mergify_path=mergify_config,
-            config_path=config_file,
-            source_type=args.source_type,
-            branch_filter=args.filter_branches,
-            explicit_branches=explicit_branches,
-        )
-        if not target_branches and not mergify_config and os.path.exists(".github/mergify.yml") and config_file != ".github/mergify.yml":
+        target_branches = []
+        if remote_config_content:
+            fmt = args.source_type
+            if fmt == "auto" and ((config_file and "mergify" in config_file) or mergify_config):
+                fmt = "mergify"
+            remote_source = branch_sources.RawContentBranchSource(remote_config_content, format_type=fmt)
             target_branches = get_maintained_branches(
-                mergify_path=".github/mergify.yml",
+                sources=[remote_source],
                 branch_filter=args.filter_branches,
                 explicit_branches=explicit_branches,
+                repo=repo,
             )
+        else:
+            target_branches = get_maintained_branches(
+                mergify_path=mergify_config,
+                config_path=config_file,
+                source_type=args.source_type,
+                branch_filter=args.filter_branches,
+                explicit_branches=explicit_branches,
+                repo=repo,
+            )
+            if not target_branches and not mergify_config and not is_pr_url and os.path.exists(".github/mergify.yml") and config_file != ".github/mergify.yml":
+                target_branches = get_maintained_branches(
+                    mergify_path=".github/mergify.yml",
+                    branch_filter=args.filter_branches,
+                    explicit_branches=explicit_branches,
+                    repo=repo,
+                )
+
         if not target_branches:
-            logger.info("No maintained branches discovered.")
+            if is_pr_url and repo:
+                if config_file:
+                    logger.info(
+                        f"No maintained branches discovered in remote config '{config_file}' for repository '{repo}'."
+                    )
+                else:
+                    paths_str = ", ".join(f"'{p}'" for p in checked_config_paths)
+                    logger.info(
+                        f"No maintained branches discovered for repository '{repo}' (checked remote config paths: {paths_str})."
+                    )
+            else:
+                if config_file:
+                    logger.info(
+                        f"No maintained branches discovered in local config file '{config_file}'."
+                    )
+                else:
+                    paths_str = ", ".join(f"'{p}'" for p in checked_config_paths)
+                    cwd_desc = os.path.basename(os.getcwd()) or os.getcwd()
+                    logger.info(
+                        f"No maintained branches discovered in local repository '{cwd_desc}' (checked local paths: {paths_str})."
+                    )
             sys.exit(0)
 
         logger.info(f"Discovered target branches: {target_branches}")
 
-        # Fetch latest branches on origin to ensure accurate git ancestry
-        run_subproc(["git", "fetch", "origin", "--depth=200"] + target_branches)
+        # Git operations: Use transient repository environment if evaluating remote repo outside its local clone
+        transient_dir = None
+        work_dir = None
+        if is_pr_url and repo and not is_local_repo_for(repo):
+            transient_dir = tempfile.mkdtemp(prefix="retrobranch_")
+            work_dir = transient_dir
+            run_subproc(["git", "init"], cwd=work_dir)
+            run_subproc(["git", "remote", "add", "origin", f"https://github.com/{repo}.git"], cwd=work_dir)
 
-        # 4. Verify presence in each target branch
-        branch_results = {}
-        labels_to_add = []
-        skipped_branches = []
+        try:
+            # Fetch latest branches on origin to ensure accurate git ancestry
+            fetch_refs = [f"+refs/heads/{b}:refs/remotes/origin/{b}" for b in target_branches] + [merge_commit]
+            run_subproc(["git", "fetch", "origin", "--depth=200"] + fetch_refs, cwd=work_dir)
 
-        for b in target_branches:
-            label_name = format_label(label_template, b)
-            if label_name in labels:
-                logger.info(f"PR #{pr_number} already has label '{label_name}' for branch '{b}'. Skipping check.")
-                branch_results[b] = (True, "Label already present on PR", True, label_name)
-                continue
+            # 4. Verify presence in each target branch
+            branch_results = {}
+            labels_to_add = []
+            skipped_branches = []
 
-            is_present, reason = verify_issue_presence_in_branch(merge_commit, b)
-            branch_results[b] = (is_present, reason, False, label_name)
+            for b in target_branches:
+                label_name = format_label(label_template, b)
+                if label_name in labels:
+                    logger.info(f"PR #{pr_number} already has label '{label_name}' for branch '{b}'. Skipping check.")
+                    branch_results[b] = (True, "Label already present on PR", True, label_name)
+                    continue
 
-            if is_present:
-                labels_to_add.append((b, label_name))
-            else:
-                skipped_branches.append((b, label_name, reason))
-
-        # 5. Apply labels for branches where issue is present
-        for b, label_name in labels_to_add:
-            add_pr_label(pr_number, label_name, repo=repo, dry_run=args.dry_run)
-
-        # 6. If any branch was skipped due to issue not being present, post comment report
-        if skipped_branches:
-            table_rows = []
-            for b, (is_present, reason, already_had, label_name) in branch_results.items():
-                lbl = f"`{label_name}`"
-                if already_had:
-                    status = "ℹ️ Already present"
-                    detail = "Label was already attached to the PR."
-                elif is_present:
-                    status = "✅ Label added"
-                    detail = f"Verified present. Added {lbl} label."
+                if work_dir:
+                    is_present, reason = verify_issue_presence_in_branch(merge_commit, b, cwd=work_dir)
                 else:
-                    status = "⏭️ Skipped"
-                    detail = f"**Issue not present**: {reason}"
-                table_rows.append(f"| `{b}` | {status} | {detail} |")
+                    is_present, reason = verify_issue_presence_in_branch(merge_commit, b)
+                branch_results[b] = (is_present, reason, False, label_name)
 
-            comment_body = (
-                f"### 🤖 Retrobranch Backport Verification Report\n\n"
-                f"This PR was merged into `{expected_base_branch}` and evaluated for backporting to maintained branches:\n\n"
-                f"| Target Branch | Status | Details |\n"
-                f"| :--- | :--- | :--- |\n"
-                + "\n".join(table_rows)
-                + "\n\n"
-                f"*Note: For skipped branches, the issue or code being addressed was not present. "
-                f"If this fix is still desired on a skipped branch, maintainers can apply the backport label manually.*"
-            )
-            post_pr_comment(pr_number, comment_body, repo=repo, dry_run=args.dry_run)
+                if is_present:
+                    labels_to_add.append((b, label_name))
+                else:
+                    skipped_branches.append((b, label_name, reason))
+
+            # 5. Apply labels for branches where issue is present
+            for b, label_name in labels_to_add:
+                add_pr_label(pr_number, label_name, repo=repo, dry_run=args.dry_run)
+
+            # 6. If any branch was skipped due to issue not being present, post comment report
+            if skipped_branches:
+                table_rows = []
+                for b, (is_present, reason, already_had, label_name) in branch_results.items():
+                    lbl = f"`{label_name}`"
+                    if already_had:
+                        status = "ℹ️ Already present"
+                        detail = "Label was already attached to the PR."
+                    elif is_present:
+                        status = "✅ Label added"
+                        detail = f"Verified present. Added {lbl} label."
+                    else:
+                        status = "⏭️ Skipped"
+                        detail = f"**Issue not present**: {reason}"
+                    table_rows.append(f"| `{b}` | {status} | {detail} |")
+
+                comment_body = (
+                    f"### 🤖 Retrobranch Backport Verification Report\n\n"
+                    f"This PR was merged into `{expected_base_branch}` and evaluated for backporting to maintained branches:\n\n"
+                    f"| Target Branch | Status | Details |\n"
+                    f"| :--- | :--- | :--- |\n"
+                    + "\n".join(table_rows)
+                    + "\n\n"
+                    f"*Note: For skipped branches, the issue or code being addressed was not present. "
+                    f"If this fix is still desired on a skipped branch, maintainers can apply the backport label manually.*"
+                )
+                post_pr_comment(pr_number, comment_body, repo=repo, dry_run=args.dry_run)
+        finally:
+            if transient_dir and os.path.exists(transient_dir):
+                shutil.rmtree(transient_dir, ignore_errors=True)
     except Exception as e:
         if getattr(args, "verbose", False):
             raise e
