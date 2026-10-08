@@ -518,6 +518,29 @@ class TestBaseBranchConfig(unittest.TestCase):
             mock_verify.assert_called_once_with("abcdef1234567890", "test-ci")
             self.assertTrue(any("Recognized main branch: 'main' (default fallback)" in msg for msg in cm.output))
 
+    def test_cli_skips_when_pr_already_has_label(self):
+        from retrobranch.cli import main
+        mock_pr = {
+            "number": 100,
+            "title": "fix: bugfix",
+            "labels": [{"name": "backport-test-ci"}],
+            "headRefName": "fix-1",
+            "baseRefName": "main",
+            "mergeCommit": {"oid": "abcdef1234567890"},
+            "mergedAt": "2026-10-07T12:00:00Z",
+            "url": "https://github.com/owner/repo/pull/100",
+        }
+        with patch("sys.argv", ["retrobr", "100", "--target-branches", "test-ci", "--dry-run"]), \
+             patch("retrobranch.cli.fetch_pr_info", return_value=mock_pr), \
+             patch("retrobranch.cli.detect_repo_default_branch", return_value="main"), \
+             patch("retrobranch.cli.verify_issue_presence_in_branch") as mock_verify, \
+             patch("retrobranch.cli.run_cmd", return_value=(0, "refs/heads/test-ci", "")), \
+             patch("retrobranch.engine.run_cmd", return_value=(0, "refs/heads/test-ci", "")):
+            with self.assertLogs("retrobranch", level="INFO") as cm:
+                main()
+            mock_verify.assert_not_called()
+            self.assertTrue(any("PR #100 already has label 'backport-test-ci' for branch 'test-ci'. Skipping check." in msg for msg in cm.output))
+
 
 class TestDetectRepoDefaultBranch(unittest.TestCase):
     """Tests programmatic default branch detection."""

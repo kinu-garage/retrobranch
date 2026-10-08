@@ -262,7 +262,7 @@ def main():
         for b in target_branches:
             label_name = format_label(label_template, b)
             if label_name in labels:
-                logger.info(f"Branch '{b}' already has label '{label_name}'. Skipping check.")
+                logger.info(f"PR #{pr_number} already has label '{label_name}' for branch '{b}'. Skipping check.")
                 branch_results[b] = (True, "Label already present on PR", True, label_name)
                 continue
 
