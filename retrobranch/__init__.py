@@ -6,13 +6,14 @@ __version__ = "0.1.0"
 
 from .engine import (
     add_pr_label,
+    detect_repo_default_branch,
     do_modified_lines_exist_in_target,
     fetch_pr_info,
     format_label,
     get_maintained_branches,
     is_feature_pr,
     post_pr_comment,
-    run_cmd,
+    run_subproc,
     verify_issue_presence_in_branch,
     was_commit_previously_backported,
 )
@@ -34,12 +35,13 @@ from .sources import (
 )
 
 __all__ = [
-    "run_cmd",
+    "run_subproc",
     "get_maintained_branches",
     "is_feature_pr",
     "was_commit_previously_backported",
     "do_modified_lines_exist_in_target",
     "verify_issue_presence_in_branch",
+    "detect_repo_default_branch",
     "fetch_pr_info",
     "format_label",
     "add_pr_label",
