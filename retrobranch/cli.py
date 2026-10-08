@@ -5,17 +5,7 @@ import re
 import sys
 import yaml
 
-from .engine import (
-    add_pr_label,
-    detect_repo_default_branch,
-    fetch_pr_info,
-    format_label,
-    get_maintained_branches,
-    is_feature_pr,
-    post_pr_comment,
-    run_cmd,
-    verify_issue_presence_in_branch,
-)
+from . import engine
 
 logger = logging.getLogger("retrobranch")
 
@@ -34,7 +24,7 @@ def parse_pr_number(val: str) -> int:
         raise ValueError(f"Invalid PR number or URL: '{val}'")
 
 
-def main():
+def _gen_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Retrobranch: Pre-flight decision engine for backport eligibility and triggering."
     )
@@ -95,7 +85,11 @@ def main():
     )
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode without modifying labels or commenting")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print detailed debug tracebacks on error")
+    return parser
 
+
+def main():
+    parser = _gen_argparser()
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.verbose else logging.INFO
@@ -182,7 +176,7 @@ def main():
 
     try:
         # 1. Fetch PR details
-        pr_data = fetch_pr_info(pr_number, repo=repo)
+        pr_data = engine.fetch_pr_info(pr_number, repo=repo)
         if not repo and pr_data.get("url"):
             url_match = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", pr_data["url"])
             if url_match:
@@ -199,7 +193,7 @@ def main():
 
         # Resolve expected base branch if not explicitly configured
         if not expected_base_branch:
-            detected_branch = detect_repo_default_branch(repo=repo)
+            detected_branch = engine.detect_repo_default_branch(repo=repo)
             if detected_branch:
                 expected_base_branch = detected_branch
                 base_branch_source = "auto-detected from repository"
@@ -220,7 +214,7 @@ def main():
         logger.info(f"Evaluating PR #{pr_number}: '{title}' (Merge commit: {merge_commit[:9]})")
 
         # 2. Check if PR is a feature/capability
-        is_feat, feat_reason = is_feature_pr(title, labels, head_branch)
+        is_feat, feat_reason = engine.is_feature_pr(title, labels, head_branch)
         if is_feat:
             logger.info(f"PR #{pr_number} is classified as a feature/capability: {feat_reason}. No backports added.")
             sys.exit(0)
@@ -232,7 +226,7 @@ def main():
         if args.target_branches:
             explicit_branches = [b.strip() for b in args.target_branches.split(",") if b.strip()]
 
-        target_branches = get_maintained_branches(
+        target_branches = engine.get_maintained_branches(
             mergify_path=mergify_config,
             config_path=config_file,
             source_type=args.source_type,
@@ -240,7 +234,7 @@ def main():
             explicit_branches=explicit_branches,
         )
         if not target_branches and not mergify_config and os.path.exists(".github/mergify.yml") and config_file != ".github/mergify.yml":
-            target_branches = get_maintained_branches(
+            target_branches = engine.get_maintained_branches(
                 mergify_path=".github/mergify.yml",
                 branch_filter=args.filter_branches,
                 explicit_branches=explicit_branches,
@@ -252,7 +246,7 @@ def main():
         logger.info(f"Discovered target branches: {target_branches}")
 
         # Fetch latest branches on origin to ensure accurate git ancestry
-        run_cmd(["git", "fetch", "origin", "--depth=200"] + target_branches)
+        engine.run_subproc(["git", "fetch", "origin", "--depth=200"] + target_branches)
 
         # 4. Verify presence in each target branch
         branch_results = {}
@@ -260,13 +254,13 @@ def main():
         skipped_branches = []
 
         for b in target_branches:
-            label_name = format_label(label_template, b)
+            label_name = engine.format_label(label_template, b)
             if label_name in labels:
                 logger.info(f"PR #{pr_number} already has label '{label_name}' for branch '{b}'. Skipping check.")
                 branch_results[b] = (True, "Label already present on PR", True, label_name)
                 continue
 
-            is_present, reason = verify_issue_presence_in_branch(merge_commit, b)
+            is_present, reason = engine.verify_issue_presence_in_branch(merge_commit, b)
             branch_results[b] = (is_present, reason, False, label_name)
 
             if is_present:
@@ -276,7 +270,7 @@ def main():
 
         # 5. Apply labels for branches where issue is present
         for b, label_name in labels_to_add:
-            add_pr_label(pr_number, label_name, repo=repo, dry_run=args.dry_run)
+            engine.add_pr_label(pr_number, label_name, repo=repo, dry_run=args.dry_run)
 
         # 6. If any branch was skipped due to issue not being present, post comment report
         if skipped_branches:
@@ -304,7 +298,7 @@ def main():
                 f"*Note: For skipped branches, the issue or code being addressed was not present. "
                 f"If this fix is still desired on a skipped branch, maintainers can apply the backport label manually.*"
             )
-            post_pr_comment(pr_number, comment_body, repo=repo, dry_run=args.dry_run)
+            engine.post_pr_comment(pr_number, comment_body, repo=repo, dry_run=args.dry_run)
     except Exception as e:
         if getattr(args, "verbose", False):
             raise e

@@ -22,7 +22,7 @@ from retrobranch.engine import (
     get_maintained_branches,
     is_feature_pr,
     post_pr_comment,
-    run_cmd,
+    run_subproc,
     was_commit_previously_backported,
 )
 from retrobranch.exceptions import (
@@ -47,7 +47,7 @@ class TestExceptions(unittest.TestCase):
     """Tests non-CLI exception handling and custom exception hierarchy."""
 
     def test_pr_not_found_exception(self):
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             mock_cmd.return_value = (1, "", "GraphQL: Could not resolve to a PullRequest with the number of 999")
             with self.assertRaises(PRNotFoundError) as ctx:
                 fetch_pr_info(999)
@@ -55,7 +55,7 @@ class TestExceptions(unittest.TestCase):
             self.assertTrue(issubclass(PRNotFoundError, RetrobranchError))
 
     def test_gh_auth_exception(self):
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             mock_cmd.return_value = (1, "", "To use 'gh', set GH_TOKEN or run 'gh auth login'")
             with self.assertRaises(GHAuthError) as ctx:
                 fetch_pr_info(123)
@@ -67,7 +67,7 @@ class TestExceptions(unittest.TestCase):
             mock_sub.return_value.returncode = 128
             mock_sub.return_value.stderr = "fatal: not a git repository"
             with self.assertRaises(GitCommandError) as ctx:
-                run_cmd(["git", "status"], check=True)
+                run_subproc(["git", "status"], check=True)
             self.assertIn("Command failed", str(ctx.exception))
             self.assertTrue(issubclass(GitCommandError, RetrobranchError))
 
@@ -206,7 +206,7 @@ class TestMaintainedBranches(unittest.TestCase):
     """Tests get_maintained_branches parsing and filtering."""
 
     def test_explicit_branches(self):
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             mock_cmd.return_value = (
                 0,
                 "refs/heads/main\nrefs/heads/release-1.0\nrefs/heads/release-2.0\nrefs/heads/release-3.0",
@@ -222,7 +222,7 @@ class TestMaintainedBranches(unittest.TestCase):
             temp_path = f.name
 
         try:
-            with patch("retrobranch.engine.run_cmd") as mock_cmd:
+            with patch("retrobranch.engine.run_subproc") as mock_cmd:
                 mock_cmd.return_value = (
                     0,
                     "refs/heads/main\nrefs/heads/release-1.0\nrefs/heads/release-2.0\nrefs/heads/release-3.0",
@@ -257,7 +257,7 @@ pull_request_rules:
             temp_path = f.name
 
         try:
-            with patch("retrobranch.engine.run_cmd") as mock_cmd:
+            with patch("retrobranch.engine.run_subproc") as mock_cmd:
                 mock_cmd.return_value = (
                     0,
                     "refs/heads/main\nrefs/heads/release-1.0\nrefs/heads/release-2.0\nrefs/heads/release-3.0",
@@ -279,7 +279,7 @@ class TestModifiedLinesCheck(unittest.TestCase):
 
     def test_lines_match(self):
         file_content = "line 1\nline 2 with meaningful code\nline 3\n"
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             mock_cmd.return_value = (0, file_content, "")
             res = do_modified_lines_exist_in_target(
                 "origin/release-1.0", "test.cpp", ["line 2 with meaningful code"]
@@ -288,7 +288,7 @@ class TestModifiedLinesCheck(unittest.TestCase):
 
     def test_lines_do_not_match(self):
         file_content = "different content here\n"
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             mock_cmd.return_value = (0, file_content, "")
             res = do_modified_lines_exist_in_target(
                 "origin/release-1.0", "test.cpp", ["nonexistent meaningful code string"]
@@ -300,14 +300,14 @@ class TestPreviousBackportCheck(unittest.TestCase):
     """Tests was_commit_previously_backported."""
 
     def test_found_by_commit_sha(self):
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             mock_cmd.return_value = (0, "abc1234 Cherry-pick of commit 123456789", "")
             was_bp, detail = was_commit_previously_backported("123456789abcdef", "origin/release-1.0")
             self.assertTrue(was_bp)
             self.assertIn("previously backported", detail)
 
     def test_not_found(self):
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             mock_cmd.return_value = (0, "", "")
             was_bp, _ = was_commit_previously_backported("123456789abcdef", "origin/release-1.0")
             self.assertFalse(was_bp)
@@ -317,13 +317,13 @@ class TestPRInteractions(unittest.TestCase):
     """Tests add_pr_label, post_pr_comment, and repo targeting."""
 
     def test_dry_run_label(self):
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             res = add_pr_label(1234, "backport-release-1.0", dry_run=True)
             self.assertTrue(res)
             mock_cmd.assert_not_called()
 
     def test_add_pr_label_rest_success(self):
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             mock_cmd.return_value = (0, "[]", "")
             res = add_pr_label(3593, "backport-humble", repo="moveit/moveit2")
             self.assertTrue(res)
@@ -332,7 +332,7 @@ class TestPRInteractions(unittest.TestCase):
             ])
 
     def test_add_pr_label_fallback_to_edit(self):
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             # First call to gh api fails (e.g. unknown API error)
             # Second call to gh pr edit succeeds
             mock_cmd.side_effect = [
@@ -347,7 +347,7 @@ class TestPRInteractions(unittest.TestCase):
             ])
 
     def test_add_pr_label_auto_create_when_missing(self):
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             # First call: 404 Not Found
             # Second call: create label succeeds
             # Third call: add label succeeds
@@ -361,7 +361,7 @@ class TestPRInteractions(unittest.TestCase):
             self.assertEqual(mock_cmd.call_count, 3)
 
     def test_post_pr_comment_success(self):
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             mock_cmd.return_value = (0, "", "")
             res = post_pr_comment(3593, "Backport report", repo="moveit/moveit2")
             self.assertTrue(res)
@@ -370,7 +370,7 @@ class TestPRInteractions(unittest.TestCase):
             ])
 
     def test_fetch_pr_info_with_repo(self):
-        with patch("retrobranch.engine.run_cmd") as mock_cmd:
+        with patch("retrobranch.engine.run_subproc") as mock_cmd:
             mock_cmd.return_value = (0, '{"number": 3593, "title": "test", "url": "https://github.com/moveit/moveit2/pull/3593"}', "")
             data = fetch_pr_info(3593, repo="moveit/moveit2")
             self.assertEqual(data["number"], 3593)
@@ -436,10 +436,9 @@ class TestBaseBranchConfig(unittest.TestCase):
 
         try:
             with patch("sys.argv", ["retrobr", "100", "--config-file", config_path, "--dry-run"]), \
-                 patch("retrobranch.cli.fetch_pr_info", return_value=mock_pr), \
-                 patch("retrobranch.cli.verify_issue_presence_in_branch", return_value=(True, "matched")), \
-                 patch("retrobranch.cli.run_cmd", return_value=(0, "refs/heads/test-ci", "")), \
-                 patch("retrobranch.engine.run_cmd", return_value=(0, "refs/heads/test-ci", "")):
+                 patch("retrobranch.engine.fetch_pr_info", return_value=mock_pr), \
+                 patch("retrobranch.engine.verify_issue_presence_in_branch", return_value=(True, "matched")), \
+                 patch("retrobranch.engine.run_subproc", return_value=(0, "refs/heads/test-ci", "")):
                 main()
         finally:
             os.remove(config_path)
@@ -463,10 +462,9 @@ class TestBaseBranchConfig(unittest.TestCase):
 
         try:
             with patch("sys.argv", ["retrobr", "100", "--config-file", config_path, "--base-branch", "staging", "--dry-run"]), \
-                 patch("retrobranch.cli.fetch_pr_info", return_value=mock_pr), \
-                 patch("retrobranch.cli.verify_issue_presence_in_branch", return_value=(True, "matched")), \
-                 patch("retrobranch.cli.run_cmd", return_value=(0, "refs/heads/test-ci", "")), \
-                 patch("retrobranch.engine.run_cmd", return_value=(0, "refs/heads/test-ci", "")):
+                 patch("retrobranch.engine.fetch_pr_info", return_value=mock_pr), \
+                 patch("retrobranch.engine.verify_issue_presence_in_branch", return_value=(True, "matched")), \
+                 patch("retrobranch.engine.run_subproc", return_value=(0, "refs/heads/test-ci", "")):
                 main()
         finally:
             os.remove(config_path)
@@ -484,11 +482,10 @@ class TestBaseBranchConfig(unittest.TestCase):
             "url": "https://github.com/owner/repo/pull/100",
         }
         with patch("sys.argv", ["retrobr", "100", "--target-branches", "test-ci", "--dry-run"]), \
-             patch("retrobranch.cli.fetch_pr_info", return_value=mock_pr), \
-             patch("retrobranch.cli.detect_repo_default_branch", return_value="rolling") as mock_detect, \
-             patch("retrobranch.cli.verify_issue_presence_in_branch", return_value=(True, "matched")) as mock_verify, \
-             patch("retrobranch.cli.run_cmd", return_value=(0, "refs/heads/test-ci", "")), \
-             patch("retrobranch.engine.run_cmd", return_value=(0, "refs/heads/test-ci", "")):
+             patch("retrobranch.engine.fetch_pr_info", return_value=mock_pr), \
+             patch("retrobranch.engine.detect_repo_default_branch", return_value="rolling") as mock_detect, \
+             patch("retrobranch.engine.verify_issue_presence_in_branch", return_value=(True, "matched")) as mock_verify, \
+             patch("retrobranch.engine.run_subproc", return_value=(0, "refs/heads/test-ci", "")):
             with self.assertLogs("retrobranch", level="INFO") as cm:
                 main()
             mock_detect.assert_called_once_with(repo="owner/repo")
@@ -508,11 +505,10 @@ class TestBaseBranchConfig(unittest.TestCase):
             "url": "https://github.com/owner/repo/pull/100",
         }
         with patch("sys.argv", ["retrobr", "100", "--target-branches", "test-ci", "--dry-run"]), \
-             patch("retrobranch.cli.fetch_pr_info", return_value=mock_pr), \
-             patch("retrobranch.cli.detect_repo_default_branch", return_value=None), \
-             patch("retrobranch.cli.verify_issue_presence_in_branch", return_value=(True, "matched")) as mock_verify, \
-             patch("retrobranch.cli.run_cmd", return_value=(0, "refs/heads/test-ci", "")), \
-             patch("retrobranch.engine.run_cmd", return_value=(0, "refs/heads/test-ci", "")):
+             patch("retrobranch.engine.fetch_pr_info", return_value=mock_pr), \
+             patch("retrobranch.engine.detect_repo_default_branch", return_value=None), \
+             patch("retrobranch.engine.verify_issue_presence_in_branch", return_value=(True, "matched")) as mock_verify, \
+             patch("retrobranch.engine.run_subproc", return_value=(0, "refs/heads/test-ci", "")):
             with self.assertLogs("retrobranch", level="INFO") as cm:
                 main()
             mock_verify.assert_called_once_with("abcdef1234567890", "test-ci")
@@ -531,11 +527,10 @@ class TestBaseBranchConfig(unittest.TestCase):
             "url": "https://github.com/owner/repo/pull/100",
         }
         with patch("sys.argv", ["retrobr", "100", "--target-branches", "test-ci", "--dry-run"]), \
-             patch("retrobranch.cli.fetch_pr_info", return_value=mock_pr), \
-             patch("retrobranch.cli.detect_repo_default_branch", return_value="main"), \
-             patch("retrobranch.cli.verify_issue_presence_in_branch") as mock_verify, \
-             patch("retrobranch.cli.run_cmd", return_value=(0, "refs/heads/test-ci", "")), \
-             patch("retrobranch.engine.run_cmd", return_value=(0, "refs/heads/test-ci", "")):
+             patch("retrobranch.engine.fetch_pr_info", return_value=mock_pr), \
+             patch("retrobranch.engine.detect_repo_default_branch", return_value="main"), \
+             patch("retrobranch.engine.verify_issue_presence_in_branch") as mock_verify, \
+             patch("retrobranch.engine.run_subproc", return_value=(0, "refs/heads/test-ci", "")):
             with self.assertLogs("retrobranch", level="INFO") as cm:
                 main()
             mock_verify.assert_not_called()
@@ -553,7 +548,7 @@ class TestDetectRepoDefaultBranch(unittest.TestCase):
                 return (0, "origin/master", "")
             return (1, "", "")
 
-        with patch("retrobranch.engine.run_cmd", side_effect=mock_run):
+        with patch("retrobranch.engine.run_subproc", side_effect=mock_run):
             branch = detect_repo_default_branch()
             self.assertEqual(branch, "master")
 
@@ -567,7 +562,7 @@ class TestDetectRepoDefaultBranch(unittest.TestCase):
                 return (0, "upstream/main", "")
             return (1, "", "")
 
-        with patch("retrobranch.engine.run_cmd", side_effect=mock_run):
+        with patch("retrobranch.engine.run_subproc", side_effect=mock_run):
             branch = detect_repo_default_branch()
             self.assertEqual(branch, "main")
 
@@ -581,7 +576,7 @@ class TestDetectRepoDefaultBranch(unittest.TestCase):
                 return (0, "ref: refs/heads/rolling\tHEAD\nabcdef123\tHEAD", "")
             return (1, "", "")
 
-        with patch("retrobranch.engine.run_cmd", side_effect=mock_run):
+        with patch("retrobranch.engine.run_subproc", side_effect=mock_run):
             branch = detect_repo_default_branch()
             self.assertEqual(branch, "rolling")
 
@@ -595,14 +590,14 @@ class TestDetectRepoDefaultBranch(unittest.TestCase):
                 return (0, "develop", "")
             return (1, "", "")
 
-        with patch("retrobranch.engine.run_cmd", side_effect=mock_run):
+        with patch("retrobranch.engine.run_subproc", side_effect=mock_run):
             branch = detect_repo_default_branch(repo="owner/repo")
             self.assertEqual(branch, "develop")
 
     def test_detect_all_fail_returns_none(self):
         from retrobranch.engine import detect_repo_default_branch
 
-        with patch("retrobranch.engine.run_cmd", return_value=(1, "", "")):
+        with patch("retrobranch.engine.run_subproc", return_value=(1, "", "")):
             branch = detect_repo_default_branch(repo="owner/repo")
             self.assertIsNone(branch)
 

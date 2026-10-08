@@ -13,7 +13,7 @@ from .engine import (
     get_maintained_branches,
     is_feature_pr,
     post_pr_comment,
-    run_cmd,
+    run_subproc,
     verify_issue_presence_in_branch,
     was_commit_previously_backported,
 )
@@ -35,7 +35,7 @@ from .sources import (
 )
 
 __all__ = [
-    "run_cmd",
+    "run_subproc",
     "get_maintained_branches",
     "is_feature_pr",
     "was_commit_previously_backported",

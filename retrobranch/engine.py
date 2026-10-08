@@ -16,24 +16,11 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
-from .exceptions import (
-    GHAuthError,
-    GHCommandError,
-    GitCommandError,
-    PRNotFoundError,
-    RetrobranchError,
-)
-from .sources import (
-    BaseBranchSource,
-    CallableBranchSource,
-    CompositeBranchSource,
-    ExplicitBranchSource,
-    GenericFileBranchSource,
-    MergifyBranchSource,
-)
+from . import exceptions
+from . import sources as branch_sources
 
 
-def run_cmd(cmd, cwd=None, check=False):
+def run_subproc(cmd, cwd=None, check=False):
     """Executes a subprocess command and returns (returncode, stdout, stderr)."""
     res = subprocess.run(
         cmd,
@@ -43,7 +30,7 @@ def run_cmd(cmd, cwd=None, check=False):
         text=True,
     )
     if check and res.returncode != 0:
-        raise GitCommandError(f"Command failed ({res.returncode}): {' '.join(cmd)}\n{res.stderr}")
+        raise exceptions.GitCommandError(f"Command failed ({res.returncode}): {' '.join(cmd)}\n{res.stderr}")
     return res.returncode, res.stdout.strip(), res.stderr.strip()
 
 
@@ -72,29 +59,29 @@ def get_maintained_branches(
     source_list = []
 
     if explicit_branches:
-        source_list.append(ExplicitBranchSource(explicit_branches))
+        source_list.append(branch_sources.ExplicitBranchSource(explicit_branches))
 
     if sources:
         for s in sources:
-            if isinstance(s, BaseBranchSource):
+            if isinstance(s, branch_sources.BaseBranchSource):
                 source_list.append(s)
             elif callable(s):
-                source_list.append(CallableBranchSource(s))
+                source_list.append(branch_sources.CallableBranchSource(s))
             elif isinstance(s, (list, tuple)):
-                source_list.append(ExplicitBranchSource(s))
+                source_list.append(branch_sources.ExplicitBranchSource(s))
             elif isinstance(s, str):
-                source_list.append(GenericFileBranchSource(s, source_type))
+                source_list.append(branch_sources.GenericFileBranchSource(s, source_type))
 
     if config_path:
-        source_list.append(GenericFileBranchSource(config_path, source_type))
+        source_list.append(branch_sources.GenericFileBranchSource(config_path, source_type))
 
     if mergify_path:
-        source_list.append(MergifyBranchSource(mergify_path))
+        source_list.append(branch_sources.MergifyBranchSource(mergify_path))
 
-    discovered_branches = CompositeBranchSource(source_list).get_branches()
+    discovered_branches = branch_sources.CompositeBranchSource(source_list).get_branches()
 
     # Filter invalid branches e.g. non-existent on the remote origin
-    rc, stdout, _ = run_cmd(["git", "ls-remote", "--heads", "origin"])
+    rc, stdout, _ = run_subproc(["git", "ls-remote", "--heads", "origin"])
     if rc == 0:
         remote_heads = [
             line.split("refs/heads/")[1]
@@ -163,16 +150,16 @@ def was_commit_previously_backported(commit_sha: str, target_ref: str) -> Tuple[
     Checks if commit_sha (or its associated PR) was previously backported to target_ref.
     """
     # 1. Search git log on target branch for cherry-pick metadata referencing the commit SHA
-    rc, stdout, _ = run_cmd(["git", "log", target_ref, f"--grep={commit_sha}", "-n", "1", "--oneline"])
+    rc, stdout, _ = run_subproc(["git", "log", target_ref, f"--grep={commit_sha}", "-n", "1", "--oneline"])
     if rc == 0 and stdout:
         return True, f"Commit {commit_sha[:9]} was previously backported in commit: {stdout}"
 
     # 2. Search git log on target branch for backport PR title referencing the original PR number
-    rc, commit_msg, _ = run_cmd(["git", "log", "-1", "--format=%s%n%b", commit_sha])
+    rc, commit_msg, _ = run_subproc(["git", "log", "-1", "--format=%s%n%b", commit_sha])
     if rc == 0 and commit_msg:
         pr_matches = re.findall(r"#(\d+)", commit_msg)
         for pr_num in pr_matches:
-            rc, stdout, _ = run_cmd(
+            rc, stdout, _ = run_subproc(
                 ["git", "log", target_ref, f"--grep=backport.*#{pr_num}", "-n", "1", "--oneline"]
             )
             if rc == 0 and stdout:
@@ -185,7 +172,7 @@ def do_modified_lines_exist_in_target(target_ref: str, file_path: str, deleted_l
     """
     Checks if non-trivial lines being modified/deleted by the PR exist in target_ref:file_path.
     """
-    rc, content, _ = run_cmd(["git", "show", f"{target_ref}:{file_path}"])
+    rc, content, _ = run_subproc(["git", "show", f"{target_ref}:{file_path}"])
     if rc != 0:
         return False
     target_lines = set(line.strip() for line in content.splitlines() if line.strip())
@@ -229,12 +216,12 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
     ref = f"origin/{target_branch}"
 
     # Verify target branch exists in local git
-    rc, _, _ = run_cmd(["git", "rev-parse", "--verify", ref])
+    rc, _, _ = run_subproc(["git", "rev-parse", "--verify", ref])
     if rc != 0:
         return False, f"Target branch '{ref}' does not exist."
 
     # Check modified/deleted files in commit
-    rc, stdout, stderr = run_cmd(
+    rc, stdout, stderr = run_subproc(
         ["git", "diff-tree", "--no-commit-id", "--name-status", "-r", f"{commit}~1", commit]
     )
     if rc != 0:
@@ -248,7 +235,7 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
     for f in added_files:
         dir_name = os.path.dirname(f)
         if dir_name:
-            rc, _, _ = run_cmd(["git", "cat-file", "-e", f"{ref}:{dir_name}"])
+            rc, _, _ = run_subproc(["git", "cat-file", "-e", f"{ref}:{dir_name}"])
             if rc != 0:
                 return (
                     False,
@@ -262,7 +249,7 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
     # Verify that pre-existing modified/deleted files exist in target branch
     missing_files = []
     for f in modified_files:
-        rc, _, _ = run_cmd(["git", "cat-file", "-e", f"{ref}:{f}"])
+        rc, _, _ = run_subproc(["git", "cat-file", "-e", f"{ref}:{f}"])
         if rc != 0:
             missing_files.append(f)
 
@@ -270,10 +257,10 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
         return False, f"Modified file(s) do not exist in '{target_branch}': {', '.join(missing_files)}"
 
     # Check code ancestry on modified lines
-    rc, merge_base, _ = run_cmd(["git", "merge-base", f"{commit}~1", ref])
+    rc, merge_base, _ = run_subproc(["git", "merge-base", f"{commit}~1", ref])
     if rc == 0 and merge_base:
         for f in modified_files:
-            rc, diff_out, _ = run_cmd(["git", "diff", "-U0", f"{commit}~1", commit, "--", f])
+            rc, diff_out, _ = run_subproc(["git", "diff", "-U0", f"{commit}~1", commit, "--", f])
             if rc != 0:
                 continue
 
@@ -289,7 +276,7 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
                 if count == 0:
                     continue
 
-                rc, blame_out, _ = run_cmd(
+                rc, blame_out, _ = run_subproc(
                     ["git", "blame", "-l", f"-L{start_line},{start_line+count-1}", f"{commit}~1", "--", f]
                 )
                 if rc != 0:
@@ -297,10 +284,10 @@ def verify_issue_presence_in_branch(commit: str, target_branch: str) -> Tuple[bo
 
                 line_commits = [line.split()[0] for line in blame_out.splitlines() if line]
                 for c in set(line_commits):
-                    rc_anc, _, _ = run_cmd(["git", "merge-base", "--is-ancestor", c, ref])
+                    rc_anc, _, _ = run_subproc(["git", "merge-base", "--is-ancestor", c, ref])
                     if rc_anc != 0:
                         # c is not in target_branch ancestry. Was it introduced after merge_base?
-                        rc_after, _, _ = run_cmd(["git", "merge-base", "--is-ancestor", merge_base, c])
+                        rc_after, _, _ = run_subproc(["git", "merge-base", "--is-ancestor", merge_base, c])
                         if rc_after == 0 and c != merge_base:
                             # Check if commit c was previously backported to target branch
                             was_bp, bp_detail = was_commit_previously_backported(c, ref)
@@ -334,23 +321,23 @@ def fetch_pr_info(pr_number: Union[int, str], repo: Optional[str] = None) -> Dic
     if repo:
         cmd.extend(["-R", repo])
     try:
-        rc, stdout, stderr = run_cmd(cmd)
+        rc, stdout, stderr = run_subproc(cmd)
     except Exception as e:
-        raise GHCommandError(f"Could not execute 'gh' CLI. Is GitHub CLI installed? Details: {e}")
+        raise exceptions.GHCommandError(f"Could not execute 'gh' CLI. Is GitHub CLI installed? Details: {e}")
 
     if rc != 0:
         if "Could not resolve to a PullRequest" in stderr or "not found" in stderr.lower():
-            raise PRNotFoundError(f"Pull Request #{pr_number} could not be found on GitHub.")
+            raise exceptions.PRNotFoundError(f"Pull Request #{pr_number} could not be found on GitHub.")
         elif "auth login" in stderr.lower() or "gh_token" in stderr.lower() or "authentication" in stderr.lower():
-            raise GHAuthError("GitHub CLI ('gh') is not authenticated. Please run 'gh auth login' or export GH_TOKEN.")
+            raise exceptions.GHAuthError("GitHub CLI ('gh') is not authenticated. Please run 'gh auth login' or export GH_TOKEN.")
         else:
             clean_msg = stderr.replace("GraphQL: ", "").strip()
-            raise GHCommandError(f"Failed to fetch PR #{pr_number}: {clean_msg}")
+            raise exceptions.GHCommandError(f"Failed to fetch PR #{pr_number}: {clean_msg}")
 
     try:
         return json.loads(stdout)
     except json.JSONDecodeError as e:
-        raise GHCommandError(f"Failed to parse JSON response from GitHub CLI: {e}")
+        raise exceptions.GHCommandError(f"Failed to parse JSON response from GitHub CLI: {e}")
 
 
 def detect_repo_default_branch(repo: Optional[str] = None) -> Optional[str]:
@@ -371,7 +358,7 @@ def detect_repo_default_branch(repo: Optional[str] = None) -> Optional[str]:
     # 1. Local Git symbolic ref (fast, offline)
     for remote in ("origin", "upstream"):
         try:
-            rc, stdout, _ = run_cmd(["git", "symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"])
+            rc, stdout, _ = run_subproc(["git", "symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"])
             if rc == 0 and stdout:
                 branch = stdout.strip()
                 prefix = f"{remote}/"
@@ -385,7 +372,7 @@ def detect_repo_default_branch(repo: Optional[str] = None) -> Optional[str]:
     # 2. Git remote symref query (Git protocol)
     for remote in ("origin", "upstream"):
         try:
-            rc, stdout, _ = run_cmd(["git", "ls-remote", "--symref", remote, "HEAD"])
+            rc, stdout, _ = run_subproc(["git", "ls-remote", "--symref", remote, "HEAD"])
             if rc == 0 and stdout:
                 match = re.search(r"ref:\s*refs/heads/(\S+)\s+HEAD", stdout)
                 if match:
@@ -399,7 +386,7 @@ def detect_repo_default_branch(repo: Optional[str] = None) -> Optional[str]:
         if repo:
             cmd.append(repo)
         cmd.extend(["--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"])
-        rc, stdout, _ = run_cmd(cmd)
+        rc, stdout, _ = run_subproc(cmd)
         if rc == 0 and stdout:
             return stdout.strip()
     except Exception:
@@ -453,7 +440,7 @@ def add_pr_label(pr_number: int, label: str, repo: Optional[str] = None, dry_run
 
     # 1. Primary: Use GitHub REST API endpoint to avoid GraphQL query issues
     endpoint = f"repos/{repo}/issues/{pr_number}/labels" if repo else f"repos/{{owner}}/{{repo}}/issues/{pr_number}/labels"
-    rc, stdout, stderr = run_cmd(["gh", "api", endpoint, "-f", f"labels[]={label}"])
+    rc, stdout, stderr = run_subproc(["gh", "api", endpoint, "-f", f"labels[]={label}"])
     if rc == 0:
         logger.info(f"Successfully added label '{label}' to PR #{pr_number}")
         return True
@@ -461,8 +448,8 @@ def add_pr_label(pr_number: int, label: str, repo: Optional[str] = None, dry_run
     # If label does not exist in repository (HTTP 404), create it and retry
     if "Not Found" in stderr or "404" in stderr or "Resource not found" in stderr:
         create_endpoint = f"repos/{repo}/labels" if repo else "repos/{owner}/{repo}/labels"
-        run_cmd(["gh", "api", create_endpoint, "-f", f"name={label}"])
-        rc_retry, _, stderr_retry = run_cmd(["gh", "api", endpoint, "-f", f"labels[]={label}"])
+        run_subproc(["gh", "api", create_endpoint, "-f", f"name={label}"])
+        rc_retry, _, stderr_retry = run_subproc(["gh", "api", endpoint, "-f", f"labels[]={label}"])
         if rc_retry == 0:
             logger.info(f"Successfully created and added label '{label}' to PR #{pr_number}")
             return True
@@ -471,7 +458,7 @@ def add_pr_label(pr_number: int, label: str, repo: Optional[str] = None, dry_run
     edit_cmd = ["gh", "pr", "edit", str(pr_number), "--add-label", label]
     if repo:
         edit_cmd.extend(["-R", repo])
-    rc_edit, _, stderr_edit = run_cmd(edit_cmd)
+    rc_edit, _, stderr_edit = run_subproc(edit_cmd)
     if rc_edit == 0:
         logger.info(f"Successfully added label '{label}' to PR #{pr_number}")
         return True
@@ -489,14 +476,14 @@ def post_pr_comment(pr_number: int, comment_body: str, repo: Optional[str] = Non
     cmd = ["gh", "pr", "comment", str(pr_number), "--body", comment_body]
     if repo:
         cmd.extend(["-R", repo])
-    rc, _, stderr = run_cmd(cmd)
+    rc, _, stderr = run_subproc(cmd)
     if rc == 0:
         logger.info(f"Successfully posted comment on PR #{pr_number}")
         return True
 
     # Fallback to GitHub REST API via gh api
     endpoint = f"repos/{repo}/issues/{pr_number}/comments" if repo else f"repos/{{owner}}/{{repo}}/issues/{pr_number}/comments"
-    rc_api, _, stderr_api = run_cmd(["gh", "api", endpoint, "-f", f"body={comment_body}"])
+    rc_api, _, stderr_api = run_subproc(["gh", "api", endpoint, "-f", f"body={comment_body}"])
     if rc_api == 0:
         logger.info(f"Successfully posted comment on PR #{pr_number} (via REST API fallback)")
         return True
